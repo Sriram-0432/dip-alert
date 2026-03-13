@@ -95,6 +95,8 @@ SIGNAL_LOG_CSV    = "signal_log.csv"
 PREV_DRAWDOWN_CSV = "prev_drawdown.csv"
 COOLDOWN_CSV        = "alert_cooldown.csv"
 LAST_NAV_DATE_FILE  = "last_nav_date.txt"
+FINAL_CHECK         = os.getenv("FINAL_CHECK", "false").lower() == "true"
+NAV_PROCESSED_FILE  = "nav_processed.txt"
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 
@@ -346,6 +348,25 @@ def build_signal_message(fund_name, signal, current_nav, vix, regime, nifty50_dd
         f"Date        : {ist_now().strftime('%d %b %Y  %H:%M IST')}"
     )
 
+
+def build_missed_nav_message() -> str:
+    last_date = load_last_nav_date() or "Unknown"
+    ist        = ist_now()
+    expected   = ist.strftime("%d %b %Y")
+    sep        = "─" * 35
+    return (
+        f"⚠️ NAV Not Updated\n"
+        f"{sep}\n"
+        f"Latest NAV : {last_date}\n"
+        f"Expected   : {expected}\n"
+        f"{sep}\n"
+        f"mfapi.in may be delayed.\n"
+        f"Please check AMFI website manually:\n"
+        f"https://www.amfiindia.com/nav-history\n"
+        f"{sep}\n"
+        f"Date       : {ist.strftime('%d %b %Y  %H:%M IST')}"
+    )
+
 def build_recovery_message(fund_name, current_dd, prev_dd, current_nav) -> str:
     improvement = prev_dd - current_dd
     return (
@@ -418,6 +439,19 @@ def get_latest_nav_date(mfapi_id: str) -> str:
         return ""
     return data[0]["date"]   # format: DD-MM-YYYY
 
+
+def is_nav_already_processed() -> bool:
+    """Returns True if we already ran the full signal check for today's NAV."""
+    if not os.path.exists(NAV_PROCESSED_FILE):
+        return False
+    with open(NAV_PROCESSED_FILE, "r", encoding="utf-8") as f:
+        return f.read().strip() == today_str()
+
+def mark_nav_processed() -> None:
+    """Mark today's NAV as fully processed — stops further checks today."""
+    with open(NAV_PROCESSED_FILE, "w", encoding="utf-8") as f:
+        f.write(today_str())
+
 def is_nav_updated() -> bool:
     """Returns True only if a new NAV date is detected since last run."""
     # Use first fund as reference
@@ -442,8 +476,15 @@ def main() -> None:
     run_date = today_str()
 
     log.info("Checking for new NAV...")
+    if is_nav_already_processed():
+        log.info("NAV already processed today — skipping.")
+        return
+
     if not is_nav_updated():
         log.info("Run complete — no new NAV today yet.")
+        if FINAL_CHECK:
+            log.info("  Final check — NAV still missing, sending alert.")
+            notify("[NAV Missing] No update received", build_missed_nav_message())
         return
 
     log.info("Fetching India VIX...")
@@ -530,6 +571,7 @@ def main() -> None:
         })
 
     save_prev_drawdowns(current_drawdowns)
+    mark_nav_processed()
 
     log_df = pd.DataFrame(summary)
     header = not os.path.exists(SIGNAL_LOG_CSV)
