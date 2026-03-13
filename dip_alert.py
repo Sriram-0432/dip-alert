@@ -93,7 +93,8 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 LOG_FILE          = os.getenv("LOG_FILE", "dip_alerts.log")
 SIGNAL_LOG_CSV    = "signal_log.csv"
 PREV_DRAWDOWN_CSV = "prev_drawdown.csv"
-COOLDOWN_CSV      = "alert_cooldown.csv"
+COOLDOWN_CSV        = "alert_cooldown.csv"
+LAST_NAV_DATE_FILE  = "last_nav_date.txt"
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 
@@ -394,11 +395,56 @@ def notify(subject: str, msg: str) -> None:
         except Exception as e:
             log.error(f"  Telegram failed: {e}")
 
+
+# ─── NAV FRESHNESS CHECK ──────────────────────────────────────────────────────
+
+def load_last_nav_date() -> str:
+    if not os.path.exists(LAST_NAV_DATE_FILE):
+        return ""
+    with open(LAST_NAV_DATE_FILE, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
+def save_last_nav_date(date_str: str) -> None:
+    with open(LAST_NAV_DATE_FILE, "w", encoding="utf-8") as f:
+        f.write(date_str)
+
+def get_latest_nav_date(mfapi_id: str) -> str:
+    """Fetch only the latest NAV date from mfapi without full processing."""
+    url  = f"https://api.mfapi.in/mf/{mfapi_id}"
+    resp = requests.get(url, timeout=15)
+    resp.raise_for_status()
+    data = resp.json().get("data", [])
+    if not data:
+        return ""
+    return data[0]["date"]   # format: DD-MM-YYYY
+
+def is_nav_updated() -> bool:
+    """Returns True only if a new NAV date is detected since last run."""
+    # Use first fund as reference
+    first_fund_id = list(FUNDS.values())[0]["mfapi_id"]
+    latest_date   = get_latest_nav_date(first_fund_id)
+    last_date     = load_last_nav_date()
+
+    log.info(f"  NAV date check — latest: {latest_date} | last seen: {last_date or 'none'}")
+
+    if latest_date == last_date:
+        log.info("  No new NAV — skipping alert run.")
+        return False
+
+    log.info(f"  New NAV detected: {latest_date} — proceeding with signal check.")
+    save_last_nav_date(latest_date)
+    return True
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     log.info("=== Dip Alert System v2.0 started ===")
     run_date = today_str()
+
+    log.info("Checking for new NAV...")
+    if not is_nav_updated():
+        log.info("Run complete — no new NAV today yet.")
+        return
 
     log.info("Fetching India VIX...")
     vix = fetch_india_vix()
