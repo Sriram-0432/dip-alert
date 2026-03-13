@@ -2,9 +2,16 @@ name: Mutual Fund Dip Alert
 
 on:
   schedule:
-    # 10:35 UTC = 4:05 PM IST, after NSE close
-    - cron: "35 10 * * 1-5"
-  workflow_dispatch:   # manual trigger for testing
+    # ── Peak window: every 30 mins, 6:00 PM – 11:30 PM IST ──
+    # 6:00 PM IST = 12:30 UTC  |  11:30 PM IST = 18:00 UTC
+    - cron: "30 12-17 * * 1-5"   # :30 past → 6:00, 6:30 ... 11:00 PM IST
+    - cron: "0 13-18 * * 1-5"    # :00 past → 6:30, 7:00 ... 11:30 PM IST
+
+    # ── Final check: 7:30 AM IST = 02:00 UTC (next day) ──
+    # Sends missed NAV alert if NAV still not updated overnight
+    - cron: "0 2 * * 2-6"
+
+  workflow_dispatch:
 
 jobs:
   run-alert:
@@ -12,6 +19,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -23,18 +32,21 @@ jobs:
 
       - name: Run dip alert
         env:
-          EMAIL_ENABLED:    ${{ secrets.EMAIL_ENABLED }}
-          EMAIL_SENDER:     ${{ secrets.EMAIL_SENDER }}
-          EMAIL_PASSWORD:   ${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_RECIPIENT:  ${{ secrets.EMAIL_RECIPIENT }}
-          TELEGRAM_ENABLED: ${{ secrets.TELEGRAM_ENABLED }}
+          EMAIL_ENABLED:      ${{ secrets.EMAIL_ENABLED }}
+          EMAIL_SENDER:       ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:     ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT:    ${{ secrets.EMAIL_RECIPIENT }}
+          TELEGRAM_ENABLED:   ${{ secrets.TELEGRAM_ENABLED }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          FINAL_CHECK: ${{ (github.event.schedule == '0 2 * * 2-6') && 'true' || 'false' }}
         run: python dip_alert.py
 
-      - name: Upload signal log
-        uses: actions/upload-artifact@v4
-        with:
-          name: signal-log-${{ github.run_number }}
-          path: signal_log.csv
-          retention-days: 90
+      - name: Commit state files
+        if: always()
+        run: |
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+          git add last_nav_date.txt nav_processed.txt signal_log.csv prev_drawdown.csv alert_cooldown.csv || true
+          git diff --cached --quiet || git commit -m "chore: update alert state [skip ci]"
+          git push || true
