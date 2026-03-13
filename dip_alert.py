@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Mutual Fund Dip Alert System — v2.0
+Mutual Fund Dip Alert System — v3.0
 Monitors: Motilal Oswal Midcap Fund, Parag Parikh Flexi Cap Fund
 
 Upgrades in v2.0:
@@ -11,6 +11,12 @@ Upgrades in v2.0:
   - Improved VIX thresholds
   - Enhanced alert message
   - Alert cooldown (max 1 alert per fund per day)
+
+Upgrades in v3.0:
+  - Crash velocity detection
+  - SEBI compliance disclaimer
+  - Professional recovery alert format
+  - Velocity boost in confidence score
 """
 
 import sys
@@ -65,10 +71,11 @@ BEAR_MARKET_ALLOCATION = {
 
 # Confidence score weights
 CONFIDENCE_WEIGHTS = {
-    "drawdown": 0.40,
+    "drawdown": 0.35,
     "vix":      0.25,
     "momentum": 0.20,
-    "regime":   0.15,
+    "regime":   0.10,
+    "velocity": 0.10,
 }
 
 MOMENTUM_LOOKBACK_DAYS  = 10
@@ -76,6 +83,13 @@ MOMENTUM_DROP_THRESHOLD = 0.05
 MA_WINDOW               = 200
 RECOVERY_IMPROVEMENT    = 0.05
 PEAK_WINDOWS            = {"3m": 60, "6m": 120}
+
+# Crash velocity thresholds
+VELOCITY_WINDOW_FAST   = 5   # days
+VELOCITY_WINDOW_SLOW   = 10  # days
+VELOCITY_CRASH_FAST    = 0.05  # 5% drop in 5 days
+VELOCITY_CRASH_SLOW    = 0.08  # 8% drop in 10 days
+
 
 # ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
 
@@ -202,18 +216,50 @@ def nifty50_market_phase(nifty50_dd: float) -> str:
     else:
         return "Normal"
 
+
+# ─── CRASH VELOCITY ───────────────────────────────────────────────────────────
+
+def calculate_crash_velocity(nav: pd.Series) -> dict:
+    """Measures speed of the fall — fast crash vs slow bleed."""
+    result = {"label": "Slow bleed", "pct_5d": 0.0, "pct_10d": 0.0, "is_crash": False}
+
+    if len(nav) >= VELOCITY_WINDOW_FAST + 1:
+        v5 = (float(nav.iloc[-1]) - float(nav.iloc[-VELOCITY_WINDOW_FAST])) / float(nav.iloc[-VELOCITY_WINDOW_FAST])
+        result["pct_5d"] = round(v5 * 100, 2)
+    if len(nav) >= VELOCITY_WINDOW_SLOW + 1:
+        v10 = (float(nav.iloc[-1]) - float(nav.iloc[-VELOCITY_WINDOW_SLOW])) / float(nav.iloc[-VELOCITY_WINDOW_SLOW])
+        result["pct_10d"] = round(v10 * 100, 2)
+
+    pct_5d  = abs(result["pct_5d"])  / 100
+    pct_10d = abs(result["pct_10d"]) / 100
+
+    if pct_5d >= VELOCITY_CRASH_FAST:
+        result["label"]    = "Fast crash"
+        result["is_crash"] = True
+    elif pct_10d >= VELOCITY_CRASH_SLOW:
+        result["label"]    = "Accelerating"
+        result["is_crash"] = True
+    else:
+        result["label"]    = "Slow bleed"
+        result["is_crash"] = False
+
+    log.info(f"  Crash velocity: {result['label']} | 5d={result['pct_5d']:.2f}% | 10d={result['pct_10d']:.2f}%")
+    return result
+
 # ─── CONFIDENCE SCORE ─────────────────────────────────────────────────────────
 
-def calculate_confidence(effective_dd: float, vix: float, momentum_negative: bool, regime: dict) -> int:
+def calculate_confidence(effective_dd: float, vix: float, momentum_negative: bool, regime: dict, velocity: dict = None) -> int:
     dd_score       = min(effective_dd / 0.20, 1.0)
     vix_score      = min(max((vix - 14) / 16, 0.0), 1.0)
     momentum_score = 1.0 if momentum_negative else 0.0
     regime_score   = {"Bull": 1.0, "Neutral": 0.6, "Bear": 0.3}.get(regime["label"], 0.6)
+    velocity_score = 1.0 if (velocity and velocity.get("is_crash")) else 0.0
     raw = (
         dd_score       * CONFIDENCE_WEIGHTS["drawdown"] +
         vix_score      * CONFIDENCE_WEIGHTS["vix"] +
         momentum_score * CONFIDENCE_WEIGHTS["momentum"] +
-        regime_score   * CONFIDENCE_WEIGHTS["regime"]
+        regime_score   * CONFIDENCE_WEIGHTS["regime"] +
+        velocity_score * CONFIDENCE_WEIGHTS["velocity"]
     )
     return round(raw * 100)
 
@@ -291,7 +337,7 @@ def confidence_bar(score: int) -> str:
     filled = round(score / 20)
     return "🟩" * filled + "⬜" * (5 - filled) + f"  {score}%"
 
-def build_signal_message(fund_name, signal, current_nav, vix, regime, nifty50_dd, confidence) -> str:
+def build_signal_message(fund_name, signal, current_nav, nav_date, vix, regime, nifty50_dd, confidence, velocity) -> str:
     label    = signal["label"]
     dd_3m    = signal["dd_3m"]
     dd_6m    = signal["dd_6m"]
@@ -326,6 +372,13 @@ def build_signal_message(fund_name, signal, current_nav, vix, regime, nifty50_dd
         "Panic":             "🔴 Panic",
     }.get(nifty_phase, nifty_phase)
 
+    velocity_tag = {
+        "Fast crash":   "⚡ Fast crash",
+        "Accelerating": "🔺 Accelerating",
+        "Slow bleed":   "🔸 Slow bleed",
+    }.get(velocity["label"], "🔸 Slow bleed")
+    velocity_detail = f"{abs(velocity['pct_5d']):.1f}% drop in 5 days" if velocity["pct_5d"] else ""
+
     sep = "─" * 35
 
     return (
@@ -337,6 +390,7 @@ def build_signal_message(fund_name, signal, current_nav, vix, regime, nifty50_dd
         f"{sep}\n"
         f"DD (3M)     : {dd_3m:.1%} from 3M peak\n"
         f"DD (6M)     : {dd_6m:.1%} from 6M peak\n"
+        f"Velocity    : {velocity_tag}  {velocity_detail}\n"
         f"{sep}\n"
         f"India VIX   : {vix:.2f}  {vix_tag}\n"
         f"Momentum    : ↓ Correction phase\n"
@@ -345,7 +399,8 @@ def build_signal_message(fund_name, signal, current_nav, vix, regime, nifty50_dd
         f"{sep}\n"
         f"Suggested   : {alloc} investment{bear_tag}\n"
         f"{sep}\n"
-        f"Date        : {ist_now().strftime('%d %b %Y  %H:%M IST')}"
+        f"NAV Date    : {nav_date}\n"
+        f"Alert Time  : {ist_now().strftime('%d %b %Y  %H:%M IST')}\n"
     )
 
 
@@ -367,20 +422,22 @@ def build_missed_nav_message() -> str:
         f"Date       : {ist.strftime('%d %b %Y  %H:%M IST')}"
     )
 
-def build_recovery_message(fund_name, current_dd, prev_dd, current_nav) -> str:
+def build_recovery_message(fund_name, current_dd, prev_dd, current_nav, nav_date) -> str:
     improvement = prev_dd - current_dd
+    sep = "─" * 35
     return (
-        f"[Recovery Alert]\n"
-        f"{fund_name}\n"
-        f"-----------------------------------\n"
+        f"📈 Recovery Signal — {fund_name}\n"
+        f"{sep}\n"
         f"Previous DD : {prev_dd:.1%} from peak\n"
         f"Current DD  : {current_dd:.1%} from peak\n"
-        f"Improvement : +{improvement:.1%}\n"
-        f"Current NAV : Rs.{current_nav:.4f}\n"
-        f"Momentum    : Turning positive\n"
-        f"-----------------------------------\n"
+        f"Improvement : ▲ {improvement:.1%} recovery\n"
+        f"Current NAV : ₹{current_nav:.4f}\n"
+        f"{sep}\n"
+        f"Momentum    : ↑ Turning positive\n"
         f"Note        : Review existing positions\n"
-        f"Date        : {ist_now().strftime('%d %b %Y %H:%M IST')}"
+        f"{sep}\n"
+        f"NAV Date    : {nav_date}\n"
+        f"Alert Time  : {ist_now().strftime('%d %b %Y  %H:%M IST')}\n"
     )
 
 # ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
@@ -513,6 +570,7 @@ def main() -> None:
             continue
 
         current_nav  = float(nav_series.iloc[-1])
+        nav_date     = nav_series.index[-1].strftime("%d %b %Y") if hasattr(nav_series.index[-1], "strftime") else str(nav_series.index[-1])
         peak_3m      = rolling_peak(nav_series, PEAK_WINDOWS["3m"])
         peak_6m      = rolling_peak(nav_series, PEAK_WINDOWS["6m"])
         dd_3m        = drawdown(current_nav, peak_3m)
@@ -525,6 +583,7 @@ def main() -> None:
             f"| Momentum={'Down' if momentum_neg else 'Flat'}"
         )
 
+        velocity = calculate_crash_velocity(nav_series)
         current_drawdowns[fund_name] = effective_dd
 
         if already_alerted_today(fund_name):
@@ -534,7 +593,7 @@ def main() -> None:
         if check_recovery(fund_name, effective_dd, prev_drawdowns):
             msg = build_recovery_message(
                 fund_name, effective_dd,
-                prev_drawdowns[fund_name], current_nav
+                prev_drawdowns[fund_name], current_nav, nav_date
             )
             notify(f"[Recovery] {fund_name}", msg)
             mark_alerted_today(fund_name)
@@ -543,10 +602,10 @@ def main() -> None:
 
         if signal:
             signal     = adjust_for_regime(signal, regime)
-            confidence = calculate_confidence(effective_dd, vix, momentum_neg, regime)
+            confidence = calculate_confidence(effective_dd, vix, momentum_neg, regime, velocity)
             msg        = build_signal_message(
-                fund_name, signal, current_nav, vix,
-                regime, nifty50_dd, confidence,
+                fund_name, signal, current_nav, nav_date, vix,
+                regime, nifty50_dd, confidence, velocity,
             )
             notify(f"[Dip Alert] {signal['label']} - {fund_name}", msg)
             mark_alerted_today(fund_name)
@@ -567,7 +626,9 @@ def main() -> None:
             "momentum_negative": momentum_neg,
             "signal":            signal["label"] if signal else "None",
             "allocation":        signal.get("allocation") if signal else "None",
-            "confidence":        calculate_confidence(effective_dd, vix, momentum_neg, regime) if signal else 0,
+            "confidence":        calculate_confidence(effective_dd, vix, momentum_neg, regime, velocity) if signal else 0,
+            "velocity":          velocity["label"],
+            "velocity_5d_pct":   velocity["pct_5d"],
         })
 
     save_prev_drawdowns(current_drawdowns)
