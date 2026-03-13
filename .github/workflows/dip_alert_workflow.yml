@@ -1,0 +1,40 @@
+name: Mutual Fund Dip Alert
+
+on:
+  schedule:
+    # 10:35 UTC = 4:05 PM IST, after NSE close
+    - cron: "35 10 * * 1-5"
+  workflow_dispatch:   # manual trigger for testing
+
+jobs:
+  run-alert:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run dip alert
+        env:
+          EMAIL_ENABLED:    ${{ secrets.EMAIL_ENABLED }}
+          EMAIL_SENDER:     ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD:   ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT:  ${{ secrets.EMAIL_RECIPIENT }}
+          TELEGRAM_ENABLED: ${{ secrets.TELEGRAM_ENABLED }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python dip_alert.py
+
+      - name: Upload signal log
+        uses: actions/upload-artifact@v4
+        with:
+          name: signal-log-${{ github.run_number }}
+          path: signal_log.csv
+          retention-days: 90
