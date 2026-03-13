@@ -289,104 +289,60 @@ def confidence_bar(score: int) -> str:
     return "🟩" * filled + "⬜" * (5 - filled) + f"  {score}%"
 
 def build_signal_message(fund_name, signal, current_nav, vix, regime, nifty50_dd, confidence) -> str:
-    label     = signal["label"]
-    dd_3m_pct = signal['dd_3m']
-    dd_6m_pct = signal['dd_6m']
-    alloc     = signal.get("allocation") or "Watch"
-    bear_note = " · bear market adjusted" if signal.get("bear_adjusted") else ""
-
-    # ── Header icons by urgency ──
-    header_emoji = {
-        "Alert":          "📡 ALERT",
-        "Buy":            "📈 BUY",
-        "Strong Buy":     "🔥 STRONG BUY",
-        "Aggressive Buy": "🚨 AGGRESSIVE BUY",
-    }.get(label, label)
+    label    = signal["label"]
+    dd_3m    = signal["dd_3m"]
+    dd_6m    = signal["dd_6m"]
+    alloc    = signal.get("allocation") or "Watch"
+    bear_tag = " ⚠️ Bear adjusted" if signal.get("bear_adjusted") else ""
 
     signal_bar = {
-        "Alert":          "🟢○○○",
-        "Buy":            "🟢🟢○○",
-        "Strong Buy":     "🟢🟢🟢○",
+        "Alert":          "🟢⚪⚪⚪",
+        "Buy":            "🟢🟢⚪⚪",
+        "Strong Buy":     "🟢🟢🟢⚪",
         "Aggressive Buy": "🟢🟢🟢🟢",
-    }.get(label, "○○○○")
+    }.get(label, "⚪⚪⚪⚪")
 
-    # ── VIX ──
-    vix_level = (
-        "🔵 Calm"          if vix < 14 else
-        "🟡 Moderate"      if vix < 19 else
-        "🟠 Elevated Fear" if vix < 23 else
-        "🔴 Panic Zone"
-    )
-    vix_meaning = (
-        "Market stable · low fear"                      if vix < 14 else
-        "Some nervousness · early opportunity"          if vix < 19 else
-        "Investors fearful · good entry zone"           if vix < 23 else
-        "High panic · historically best time to invest"
+    vix_tag = (
+        "🔵 Calm"            if vix < 14 else
+        "🟡 Moderate"        if vix < 19 else
+        "🟠 Elevated stress" if vix < 23 else
+        "🔴 Panic zone"
     )
 
-    # ── Regime ──
-    regime_icon = {"Bull": "🐂", "Neutral": "⚖️", "Bear": "🐻"}.get(regime["label"], "⚖️")
-    regime_meaning = {
-        "Bull":    "Uptrend intact · dip is likely temporary",
-        "Neutral": "Mixed trend · invest moderately",
-        "Bear":    "Downtrend active · invest cautiously",
+    regime_tag = {
+        "Bull":    f"🐂 Bull  ({regime['pct_vs_ma']:+.1f}% vs 200DMA)",
+        "Neutral": f"⚖️ Neutral ({regime['pct_vs_ma']:+.1f}% vs 200DMA)",
+        "Bear":    f"🐻 Bear  ({regime['pct_vs_ma']:+.1f}% vs 200DMA)",
     }.get(regime["label"], "")
 
-    # ── Nifty ──
     nifty_phase = nifty50_market_phase(nifty50_dd)
-    nifty_icon  = {"Normal": "🟢", "Correction": "🟡", "Deeper correction": "🟠", "Panic": "🔴"}.get(nifty_phase, "⚪")
-    nifty_meaning = {
-        "Normal":            "No broad market stress",
-        "Correction":        "Market-wide dip · not just this fund",
-        "Deeper correction": "Broad market under stress",
-        "Panic":             "Market-wide panic · rare opportunity",
-    }.get(nifty_phase, "")
+    nifty_tag = {
+        "Normal":            "🟢 Stable",
+        "Correction":        "🟡 Correction",
+        "Deeper correction": "🟠 Deeper correction",
+        "Panic":             "🔴 Panic",
+    }.get(nifty_phase, nifty_phase)
 
-    # ── Allocation ──
-    alloc_icon = {"Large": "🔴", "Medium": "🟠", "Small": "🟡", "Very Small": "🟤", "Watch": "⚪"}.get(alloc, "⚪")
-    alloc_meaning = {
-        "Large":      "Deploy your maximum planned amount",
-        "Medium":     "Deploy a moderate planned amount",
-        "Small":      "Deploy your minimum planned amount",
-        "Very Small": "Deploy very cautiously",
-        "Watch":      "Monitor only · no investment yet",
-    }.get(alloc, "")
+    sep = "─" * 35
 
     return (
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"  {header_emoji}\n"
-        f"  {fund_name}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"\n"
-        f"  ◈ Strength    {signal_bar}  {label}\n"
-        f"  ◈ Confidence  {confidence_bar(confidence)}\n"
-        f"  ◈ Current NAV ₹{current_nav:.4f}\n"
-        f"\n"
-        f"───────── 📉 DRAWDOWN ──────────\n"
-        f"  ▸ 3-Month  {dd_3m_pct:>6.1%}  Short-term dip\n"
-        f"  ▸ 6-Month  {dd_6m_pct:>6.1%}  Medium-term dip\n"
-        f"\n"
-        f"──────── 🌐 MARKET PULSE ───────\n"
-        f"  ▸ VIX       {vix_level}\n"
-        f"              {vix_meaning}\n"
-        f"\n"
-        f"  ▸ Momentum  ↓ Midcap fell >5% in 10 days\n"
-        f"\n"
-        f"  ▸ Regime    {regime_icon} {regime['label']} Market\n"
-        f"              {regime_meaning}\n"
-        f"              {regime['pct_vs_ma']:+.1f}% vs 200-Day MA\n"
-        f"\n"
-        f"  ▸ Nifty 50  {nifty_icon} {nifty_phase}\n"
-        f"              {nifty_meaning}\n"
-        f"              {nifty50_dd:.1%} below 6M peak\n"
-        f"\n"
-        f"──────── 💡 ACTION NEEDED ──────\n"
-        f"  {alloc_icon} {alloc.upper()} INVESTMENT{bear_note}\n"
-        f"     {alloc_meaning}\n"
-        f"\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"  🕐 {ist_now().strftime('%d %b %Y  %I:%M %p IST')}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        f"📊 {label} — {fund_name}\n"
+        f"{sep}\n"
+        f"Signal      : {signal_bar} {label}\n"
+        f"Confidence  : {confidence_bar(confidence)}\n"
+        f"Current NAV : ₹{current_nav:.4f}\n"
+        f"{sep}\n"
+        f"DD (3M)     : {dd_3m:.1%} from 3M peak\n"
+        f"DD (6M)     : {dd_6m:.1%} from 6M peak\n"
+        f"{sep}\n"
+        f"India VIX   : {vix:.2f}  {vix_tag}\n"
+        f"Momentum    : ↓ Correction phase\n"
+        f"Market      : {regime_tag}\n"
+        f"Nifty 50    : {nifty_tag}  ({nifty50_dd:.1%} from peak)\n"
+        f"{sep}\n"
+        f"Suggested   : {alloc} investment{bear_tag}\n"
+        f"{sep}\n"
+        f"Date        : {ist_now().strftime('%d %b %Y  %H:%M IST')}"
     )
 
 def build_recovery_message(fund_name, current_dd, prev_dd, current_nav) -> str:
