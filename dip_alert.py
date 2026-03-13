@@ -10,7 +10,7 @@ import io
 import os
 import logging
 import smtplib
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -196,7 +196,7 @@ def build_message(fund_name: str, signal: dict, current_nav: float, vix: float) 
         f"Momentum    : ↓ Correction phase\n"
         f"Suggested   : {alloc} investment\n"
         f"{'─'*35}\n"
-        f"Date        : {datetime.now().strftime('%d %b %Y %H:%M IST')}"
+        f"Date        : {(datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime('%d %b %Y %H:%M IST')}"
     )
 
 
