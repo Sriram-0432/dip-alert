@@ -40,14 +40,18 @@ import yfinance as yf
 
 FUNDS = {
     "Motilal Oswal Midcap Fund": {
-        "mfapi_id": "127042",
+        "isin": "INF247L01445",
         "short_name": "MO_Midcap",
     },
     "Parag Parikh Flexi Cap Fund": {
-        "mfapi_id": "122639",
+        "isin": "INF879O01019",
         "short_name": "PP_FlexiCap",
     },
 }
+
+# AMFI NAV API — official source, no delay
+AMFI_NAV_URL = "https://api.mfapi.in/mf/search"  # replaced below
+AMFI_ALL_NAV_URL = "https://www.amfiindia.com/spages/NAVAll.txt"
 
 NIFTY50_TICKER   = "^NSEI"
 NIFTY_MIDCAP_150 = "NIFTYMIDCAP150.NS"
@@ -134,18 +138,82 @@ def today_str() -> str:
 
 # ─── DATA FETCHING ────────────────────────────────────────────────────────────
 
-def fetch_nav_history(fund_name: str, fund_cfg: dict) -> pd.Series:
-    url = f"https://api.mfapi.in/mf/{fund_cfg['mfapi_id']}"
-    resp = requests.get(url, timeout=15)
+# ─── AMFI NAV CACHE (shared across funds per run) ─────────────────────────────
+_amfi_history_cache: dict = {}
+
+def fetch_amfi_nav_all() -> dict:
+    """
+    Fetch current day NAV for all funds from AMFI directly.
+    Returns dict of {isin: nav_value}
+    """
+    resp = requests.get(AMFI_ALL_NAV_URL, timeout=30)
     resp.raise_for_status()
-    data = resp.json().get("data", [])
+    isin_nav = {}
+    for line in resp.text.splitlines():
+        parts = line.strip().split(";")
+        if len(parts) >= 5:
+            isin   = parts[2].strip()
+            isin2  = parts[3].strip()
+            nav_str = parts[4].strip()
+            try:
+                nav_val = float(nav_str)
+                if isin:
+                    isin_nav[isin]  = nav_val
+                if isin2:
+                    isin_nav[isin2] = nav_val
+            except ValueError:
+                continue
+    log.info(f"  AMFI NAV feed: {len(isin_nav)} records loaded")
+    return isin_nav
+
+def fetch_amfi_nav_history(fund_name: str, fund_cfg: dict) -> pd.Series:
+    """
+    Fetch full historical NAV from mfapi.in for drawdown calculations,
+    but override the latest NAV with today's fresh value from AMFI directly.
+    """
+    global _amfi_history_cache
+
+    # Step 1: Get historical data from mfapi (for 3M/6M peak calculations)
+    # We still need history — AMFI only gives today's NAV, not history
+    isin = fund_cfg["isin"]
+
+    # Search mfapi by ISIN to get scheme code
+    search_url = f"https://api.mfapi.in/mf/search?q={isin}"
+    resp = requests.get(search_url, timeout=15)
+    resp.raise_for_status()
+    results = resp.json()
+    if not results:
+        raise ValueError(f"No scheme found for ISIN {isin}")
+    scheme_code = results[0]["schemeCode"]
+
+    hist_url = f"https://api.mfapi.in/mf/{scheme_code}"
+    resp2 = requests.get(hist_url, timeout=15)
+    resp2.raise_for_status()
+    data = resp2.json().get("data", [])
     records = {
         datetime.strptime(d["date"], "%d-%m-%Y").date(): float(d["nav"])
         for d in data
     }
     series = pd.Series(records).sort_index()
+
+    # Step 2: Override latest NAV with fresh AMFI value
+    if not _amfi_history_cache:
+        _amfi_history_cache = fetch_amfi_nav_all()
+
+    if isin in _amfi_history_cache:
+        today = ist_now().date()
+        series[today] = _amfi_history_cache[isin]
+        series = series.sort_index()
+        log.info(f"  {fund_name}: AMFI NAV override → ₹{_amfi_history_cache[isin]:.4f} for {today}")
+    else:
+        log.warning(f"  {fund_name}: ISIN {isin} not found in AMFI feed — using mfapi latest")
+
     log.info(f"  {fund_name}: {len(series)} NAV records, latest = {series.iloc[-1]:.4f}")
     return series
+
+def fetch_nav_history(fund_name: str, fund_cfg: dict) -> pd.Series:
+    """Wrapper — fetches from AMFI directly with mfapi history."""
+    return fetch_amfi_nav_history(fund_name, fund_cfg)
 
 def fetch_yf(ticker: str, period: str = "1y") -> pd.Series:
     df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
@@ -486,15 +554,24 @@ def save_last_nav_date(date_str: str) -> None:
     with open(LAST_NAV_DATE_FILE, "w", encoding="utf-8") as f:
         f.write(date_str)
 
-def get_latest_nav_date(mfapi_id: str) -> str:
-    """Fetch only the latest NAV date from mfapi without full processing."""
-    url  = f"https://api.mfapi.in/mf/{mfapi_id}"
-    resp = requests.get(url, timeout=15)
+def get_latest_nav_date() -> str:
+    """Check AMFI directly for today's NAV availability."""
+    resp = requests.get(AMFI_ALL_NAV_URL, timeout=30)
     resp.raise_for_status()
-    data = resp.json().get("data", [])
-    if not data:
-        return ""
-    return data[0]["date"]   # format: DD-MM-YYYY
+    # AMFI feed has a date header line like: "Scheme Code;ISIN...;NAV;Date"
+    # The date appears in data rows as last field
+    for line in resp.text.splitlines():
+        parts = line.strip().split(";")
+        if len(parts) >= 6:
+            date_str = parts[-1].strip()
+            try:
+                parsed = datetime.strptime(date_str, "%d-%b-%Y")
+                result = parsed.strftime("%d-%m-%Y")
+                log.info(f"  AMFI latest NAV date: {result}")
+                return result
+            except ValueError:
+                continue
+    return ""
 
 
 def is_nav_already_processed() -> bool:
@@ -511,10 +588,8 @@ def mark_nav_processed() -> None:
 
 def is_nav_updated() -> bool:
     """Returns True only if a new NAV date is detected since last run."""
-    # Use first fund as reference
-    first_fund_id = list(FUNDS.values())[0]["mfapi_id"]
-    latest_date   = get_latest_nav_date(first_fund_id)
-    last_date     = load_last_nav_date()
+    latest_date = get_latest_nav_date()
+    last_date   = load_last_nav_date()
 
     log.info(f"  NAV date check — latest: {latest_date} | last seen: {last_date or 'none'}")
 
