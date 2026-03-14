@@ -317,27 +317,6 @@ def calculate_crash_velocity(nav: pd.Series) -> dict:
     log.info(f"  Crash velocity: {result['label']} | 5d={result['pct_5d']:.2f}% | 10d={result['pct_10d']:.2f}%")
     return result
 
-
-def crash_severity(dd: float) -> tuple[str, int]:
-    """
-    Converts drawdown into a 5-level crash severity meter.
-    """
-    if dd >= 0.30:
-        level = 5
-    elif dd >= 0.25:
-        level = 4
-    elif dd >= 0.18:
-        level = 3
-    elif dd >= 0.12:
-        level = 2
-    elif dd >= 0.07:
-        level = 1
-    else:
-        level = 0
-
-    bar = "█" * level + "░" * (5 - level)
-    return bar, level
-
 # ─── CONFIDENCE SCORE ─────────────────────────────────────────────────────────
 
 def calculate_confidence(effective_dd: float, vix: float, momentum_negative: bool, regime: dict, velocity: dict = None) -> int:
@@ -484,7 +463,6 @@ def build_signal_message(fund_name, signal, current_nav, nav_date, vix, regime, 
     label    = signal["label"]
     dd_3m    = signal["dd_3m"]
     dd_6m    = signal["dd_6m"]
-    crash_bar, crash_level = crash_severity(max(dd_3m, dd_6m))
     alloc    = signal.get("allocation") or "Watch"
     bear_tag = " ⚠️ Bear adjusted" if signal.get("bear_adjusted") else ""
 
@@ -541,7 +519,6 @@ def build_signal_message(fund_name, signal, current_nav, nav_date, vix, regime, 
         f"📉 *Drawdown*\n"
         f"  3M Peak  ›  *{e(f'{dd_3m:.1%}')}* _{e('from 3M peak')}_\n"
         f"  6M Peak  ›  *{e(f'{dd_6m:.1%}')}* _{e('from 6M peak')}_\n"
-        f"  Crash Lv ›  {crash_bar}  {crash_level}/5\n"
         f"  Velocity ›  {velocity_tag}  _{e(velocity_detail)}_\n"
         f"\n"
         f"🌐 *Market Pulse*\n"
@@ -717,10 +694,13 @@ def escape_md(text: str) -> str:
     """
     if text is None:
         return ""
+
     text = str(text)
-    chars = r"_*[]()~`>#+-=|{}.!\"
+    chars = "_*[]()~`>#+-=|{}.!\"
+
     for ch in chars:
         text = text.replace(ch, "\" + ch)
+
     return text
 
 def send_telegram(text: str, bot_token: str = "", chat_id: str = "") -> None:
@@ -734,6 +714,7 @@ def send_telegram(text: str, bot_token: str = "", chat_id: str = "") -> None:
             "chat_id":    chat_id,
             "text":       text,
             "parse_mode": "MarkdownV2",
+            "disable_web_page_preview": True,
         },
         timeout=10,
     )
