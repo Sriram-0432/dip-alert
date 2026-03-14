@@ -480,11 +480,11 @@ def build_signal_message(fund_name, signal, current_nav, nav_date, vix, regime, 
         "🔴 Panic zone"
     )
 
-    _pct = escape_md(f"{regime['pct_vs_ma']:+.1f}%")
+    _pct = f"{regime['pct_vs_ma']:+.1f}%"
     regime_tag = {
-        "Bull":    f"🐂 Bull  \\({_pct} vs 200DMA\\)",
-        "Neutral": f"⚖️ Neutral \\({_pct} vs 200DMA\\)",
-        "Bear":    f"🐻 Bear  \\({_pct} vs 200DMA\\)",
+        "Bull":    f"🐂 <b>Bull</b>  ({_pct} vs 200DMA)",
+        "Neutral": f"⚖️ <b>Neutral</b>  ({_pct} vs 200DMA)",
+        "Bear":    f"🐻 <b>Bear</b>  ({_pct} vs 200DMA)",
     }.get(regime["label"], "")
 
     nifty_phase = nifty50_market_phase(nifty50_dd)
@@ -502,7 +502,7 @@ def build_signal_message(fund_name, signal, current_nav, nav_date, vix, regime, 
     }.get(velocity["label"], "🔸 Slow bleed")
     velocity_detail = f"{abs(velocity['pct_5d']):.1f}% drop in 5 days" if velocity["pct_5d"] else ""
 
-    # MarkdownV2 — escape dynamic values
+    # HTML — escape dynamic values
     e = escape_md
     sep = e("━" * 30)
 
@@ -689,12 +689,16 @@ def send_email(subject: str, body: str) -> None:
     log.info("  Email sent.")
 
 def escape_md(text: str) -> str:
-    """Escape special characters for Telegram MarkdownV2."""
-    special = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!', '\\']
-    result = str(text)
-    for ch in special:
-        result = result.replace(ch, '\\' + ch)
-    return result
+    """Escape special characters for Telegram HTML mode."""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def b(text) -> str:
+    """Bold text for Telegram HTML."""
+    return f"<b>{escape_md(text)}</b>"
+
+def i(text) -> str:
+    """Italic text for Telegram HTML."""
+    return f"<i>{escape_md(text)}</i>"
 
 def send_telegram(text: str, bot_token: str = "", chat_id: str = "") -> None:
     if not bot_token or not chat_id:
@@ -706,7 +710,7 @@ def send_telegram(text: str, bot_token: str = "", chat_id: str = "") -> None:
         json={
             "chat_id":    chat_id,
             "text":       text,
-            "parse_mode": "MarkdownV2",
+            "parse_mode": "HTML",
         },
         timeout=10,
     )
