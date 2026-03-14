@@ -689,19 +689,12 @@ def send_email(subject: str, body: str) -> None:
     log.info("  Email sent.")
 
 def escape_md(text: str) -> str:
-    """
-    Safe MarkdownV2 escaping for Telegram.
-    """
-    if text is None:
-        return ""
-
-    text = str(text)
-    chars = "_*[]()~`>#+-=|{}.!\"
-
-    for ch in chars:
-        text = text.replace(ch, "\" + ch)
-
-    return text
+    """Escape special characters for Telegram MarkdownV2."""
+    special = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!', '\\']
+    result = str(text)
+    for ch in special:
+        result = result.replace(ch, '\\' + ch)
+    return result
 
 def send_telegram(text: str, bot_token: str = "", chat_id: str = "") -> None:
     if not bot_token or not chat_id:
@@ -714,7 +707,6 @@ def send_telegram(text: str, bot_token: str = "", chat_id: str = "") -> None:
             "chat_id":    chat_id,
             "text":       text,
             "parse_mode": "MarkdownV2",
-            "disable_web_page_preview": True,
         },
         timeout=10,
     )
