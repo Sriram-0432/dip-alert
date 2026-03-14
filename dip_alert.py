@@ -433,10 +433,16 @@ def check_hold(fund_name: str, current_signal: str, prev_signals: dict, current_
 def already_alerted_today(fund_name: str) -> bool:
     if not os.path.exists(COOLDOWN_CSV):
         return False
-    with open(COOLDOWN_CSV, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            if row["fund"] == fund_name and row["date"] == today_str():
-                return True
+    try:
+        with open(COOLDOWN_CSV, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            if not reader.fieldnames:
+                return False
+            for row in reader:
+                if row.get("fund") == fund_name and row.get("date") == today_str():
+                    return True
+    except Exception:
+        return False
     return False
 
 def mark_alerted_today(fund_name: str) -> None:
@@ -474,10 +480,11 @@ def build_signal_message(fund_name, signal, current_nav, nav_date, vix, regime, 
         "🔴 Panic zone"
     )
 
+    _pct = escape_md(f"{regime['pct_vs_ma']:+.1f}%")
     regime_tag = {
-        "Bull":    f"🐂 Bull  ({regime['pct_vs_ma']:+.1f}% vs 200DMA)",
-        "Neutral": f"⚖️ Neutral ({regime['pct_vs_ma']:+.1f}% vs 200DMA)",
-        "Bear":    f"🐻 Bear  ({regime['pct_vs_ma']:+.1f}% vs 200DMA)",
+        "Bull":    f"🐂 Bull  \\({_pct} vs 200DMA\\)",
+        "Neutral": f"⚖️ Neutral \\({_pct} vs 200DMA\\)",
+        "Bear":    f"🐻 Bear  \\({_pct} vs 200DMA\\)",
     }.get(regime["label"], "")
 
     nifty_phase = nifty50_market_phase(nifty50_dd)
