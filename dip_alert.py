@@ -502,37 +502,35 @@ def build_signal_message(fund_name, signal, current_nav, nav_date, vix, regime, 
     }.get(velocity["label"], "🔸 Slow bleed")
     velocity_detail = f"{abs(velocity['pct_5d']):.1f}% drop in 5 days" if velocity["pct_5d"] else ""
 
-    # HTML — escape dynamic values
-    e = escape_md
-    sep = e("━" * 30)
+    sep = "━" * 30
 
     return (
         f"{sep}\n"
-        f"*{e(label.upper())}* 〡 *{e(fund_name)}*\n"
+        f"<b>{escape_md(label.upper())}</b> 〡 <b>{escape_md(fund_name)}</b>\n"
         f"{sep}\n"
         f"\n"
-        f"📊 *Signal Overview*\n"
-        f"  Strength  ›  {signal_bar} _{e(label)}_\n"
-        f"  Confidence›  {confidence_bar(confidence)}\n"
-        f"  NAV Today ›  *₹{e(str(round(current_nav, 4)))}*\n"
+        f"📊 <b>Signal Overview</b>\n"
+        f"  Strength   ›  {signal_bar} <i>{escape_md(label)}</i>\n"
+        f"  Confidence ›  {confidence_bar(confidence)}\n"
+        f"  NAV Today  ›  <b>₹{round(current_nav, 4)}</b>\n"
         f"\n"
-        f"📉 *Drawdown*\n"
-        f"  3M Peak  ›  *{e(f'{dd_3m:.1%}')}* _{e('from 3M peak')}_\n"
-        f"  6M Peak  ›  *{e(f'{dd_6m:.1%}')}* _{e('from 6M peak')}_\n"
-        f"  Velocity ›  {velocity_tag}  _{e(velocity_detail)}_\n"
+        f"📉 <b>Drawdown</b>\n"
+        f"  3M Peak  ›  <b>{dd_3m:.1%}</b> <i>from 3M peak</i>\n"
+        f"  6M Peak  ›  <b>{dd_6m:.1%}</b> <i>from 6M peak</i>\n"
+        f"  Velocity ›  {velocity_tag}  <i>{escape_md(velocity_detail)}</i>\n"
         f"\n"
-        f"🌐 *Market Pulse*\n"
-        f"  VIX      ›  *{e(str(round(vix,2)))}*  {vix_tag}\n"
-        f"  Momentum ›  ↓ _Correction phase_\n"
+        f"🌐 <b>Market Pulse</b>\n"
+        f"  VIX      ›  <b>{vix:.2f}</b>  {vix_tag}\n"
+        f"  Momentum ›  ↓ <i>Correction phase</i>\n"
         f"  Regime   ›  {regime_tag}\n"
-        f"  Nifty 50 ›  {nifty_tag}  _{e(f'{nifty50_dd:.1%} from peak')}_\n"
+        f"  Nifty 50 ›  {nifty_tag}  <i>{nifty50_dd:.1%} from peak</i>\n"
         f"\n"
-        f"💡 *Action*\n"
-        f"  *{e(alloc)} investment*{e(bear_tag)}\n"
+        f"💡 <b>Action</b>\n"
+        f"  <b>{escape_md(alloc)} investment</b>{escape_md(bear_tag)}\n"
         f"\n"
         f"{sep}\n"
-        f"🗓 NAV Date   ›  _{e(nav_date)}_\n"
-        f"🕐 Alert Time ›  _{e(ist_now().strftime('%d %b %Y  %H:%M IST'))}_\n"
+        f"🗓 NAV Date   ›  <i>{escape_md(nav_date)}</i>\n"
+        f"🕐 Alert Time ›  <i>{ist_now().strftime('%d %b %Y  %H:%M IST')}</i>\n"
         f"{sep}"
     )
 
@@ -547,26 +545,27 @@ def build_watch_message(fund_name, current_nav, nav_date, dd_3m, dd_6m, regime, 
         "Neutral": f"⚖️ Neutral \\({pct} vs 200DMA\\)",
         "Bear":    f"🐻 Bear \\({pct} vs 200DMA\\)",
     }.get(regime["label"], "")
+    sep2 = "━" * 30
     return (
-        f"{sep}\n"
-        f"*WATCH* 〡 *{e(fund_name)}*\n"
-        f"{sep}\n"
+        f"{sep2}\n"
+        f"<b>WATCH</b> 〡 <b>{escape_md(fund_name)}</b>\n"
+        f"{sep2}\n"
         f"\n"
-        f"🟦 *Dip opportunity has passed*\n"
+        f"🟦 <b>Dip opportunity has passed</b>\n"
         f"  Market is recovering — stop fresh investments\n"
         f"  Wait for the next dip opportunity\n"
         f"\n"
-        f"📊 *Current Status*\n"
-        f"  NAV Today ›  *₹{e(str(round(current_nav, 4)))}*\n"
-        f"  DD 3M   ›  {e(f'{dd_3m:.1%}')} from 3M peak\n"
-        f"  DD 6M   ›  {e(f'{dd_6m:.1%}')} from 6M peak\n"
-        f"  VIX      ›  {e(str(round(vix, 2)))} — Low stress\n"
-        f"  Regime   ›  {regime_tag}\n"
+        f"📊 <b>Current Status</b>\n"
+        f"  NAV Today ›  <b>₹{round(current_nav, 4)}</b>\n"
+        f"  DD 3M     ›  <b>{dd_3m:.1%}</b> from 3M peak\n"
+        f"  DD 6M     ›  <b>{dd_6m:.1%}</b> from 6M peak\n"
+        f"  VIX       ›  {round(vix, 2)} — Low stress\n"
+        f"  Regime    ›  {regime_tag}\n"
         f"\n"
-        f"{sep}\n"
-        f"🗓 NAV Date   ›  _{e(nav_date)}_\n"
-        f"🕐 Alert Time ›  _{e(ist_now().strftime('%d %b %Y  %H:%M IST'))}_\n"
-        f"{sep}"
+        f"{sep2}\n"
+        f"🗓 NAV Date   ›  <i>{escape_md(nav_date)}</i>\n"
+        f"🕐 Alert Time ›  <i>{ist_now().strftime('%d %b %Y  %H:%M IST')}</i>\n"
+        f"{sep2}"
     )
 
 def build_hold_message(fund_name, current_nav, nav_date, dd_3m, dd_6m, prev_dd, regime, vix) -> str:
@@ -581,7 +580,7 @@ def build_hold_message(fund_name, current_nav, nav_date, dd_3m, dd_6m, prev_dd, 
     }.get(regime["label"], "")
     return (
         f"{sep}\n"
-        f"*HOLD* 〡 *{e(fund_name)}*\n"
+        f"<b>HOLD</b> 〡 <b>{escape_md(fund_name)}</b>\n"
         f"{sep}\n"
         f"\n"
         f"🟩 *Recovery in progress*\n"
@@ -604,15 +603,14 @@ def build_hold_message(fund_name, current_nav, nav_date, dd_3m, dd_6m, prev_dd, 
 
 def build_weekly_summary(funds_data: list) -> str:
     """Weekly summary sent every Monday with status of all funds."""
-    e = escape_md
-    sep = e("━" * 30)
+    sep = "━" * 30
     ist = ist_now()
     lines = [
-        f"{sep}",
-        f"*📋 WEEKLY SUMMARY*",
-        f"_{e(ist.strftime('%d %b %Y'))} — Both Funds_",
-        f"{sep}",
-        f"",
+        sep,
+        f"<b>📋 WEEKLY SUMMARY</b>",
+        f"<i>{ist.strftime('%d %b %Y')} — Both Funds</i>",
+        sep,
+        "",
     ]
     for fd in funds_data:
         signal_emoji = {
@@ -623,18 +621,18 @@ def build_weekly_summary(funds_data: list) -> str:
             "None":           "⚪⚪⚪⚪",
         }.get(fd["signal"], "⚪⚪⚪⚪")
         lines += [
-            f"*{e(fd['fund_name'])}*",
-            f"  Signal  ›  {signal_emoji} _{e(fd['signal'])}_",
-            f"  NAV     ›  *₹{e(str(round(fd['nav'], 4)))}*",
-            f"  DD 3M   ›  {e(f"{fd['dd_3m']:.1%}")}",
-            f"  DD 6M   ›  {e(f"{fd['dd_6m']:.1%}")}",
-            f"  Regime  ›  {e(fd['regime'])}",
-            f"",
+            f"<b>{escape_md(fd['fund_name'])}</b>",
+            f"  Signal  ›  {signal_emoji} <i>{escape_md(fd['signal'])}</i>",
+            f"  NAV     ›  <b>₹{round(fd['nav'], 4)}</b>",
+            f"  DD 3M   ›  {fd['dd_3m']:.1%}",
+            f"  DD 6M   ›  {fd['dd_6m']:.1%}",
+            f"  Regime  ›  {escape_md(fd['regime'])}",
+            "",
         ]
     lines += [
-        f"{sep}",
-        f"🕐 _{e(ist.strftime('%d %b %Y  %H:%M IST'))}_",
-        f"{sep}",
+        sep,
+        f"🕐 <i>{ist.strftime('%d %b %Y  %H:%M IST')}</i>",
+        sep,
     ]
     return "\n".join(lines)
 
