@@ -43,11 +43,15 @@ FUNDS = {
         "scheme_code": "127042",
         "isin":        "INF247L01445",
         "short_name":  "MO_Midcap",
+        "bot_token":   os.getenv("TELEGRAM_BOT_TOKEN_MO", ""),
+        "chat_id":     os.getenv("TELEGRAM_CHAT_ID_MO", ""),
     },
     "Parag Parikh Flexi Cap Fund": {
         "scheme_code": "122639",
         "isin":        "INF879O01019",
         "short_name":  "PP_FlexiCap",
+        "bot_token":   os.getenv("TELEGRAM_BOT_TOKEN_PP", ""),
+        "chat_id":     os.getenv("TELEGRAM_CHAT_ID_PP", ""),
     },
 }
 
@@ -106,14 +110,13 @@ SMTP_HOST          = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT          = int(os.getenv("SMTP_PORT", "587"))
 
 TELEGRAM_ENABLED   = os.getenv("TELEGRAM_ENABLED", "false").lower() == "true"
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 
 LOG_FILE          = os.getenv("LOG_FILE", "dip_alerts.log")
 SIGNAL_LOG_CSV    = "signal_log.csv"
 PREV_DRAWDOWN_CSV = "prev_drawdown.csv"
 COOLDOWN_CSV        = "alert_cooldown.csv"
 LAST_NAV_DATE_FILE  = "last_nav_date.txt"
+PREV_SIGNAL_CSV     = "prev_signal.csv"
 FINAL_CHECK         = os.getenv("FINAL_CHECK", "false").lower() == "true"
 NAV_PROCESSED_FILE  = "nav_processed.txt"
 
@@ -380,6 +383,51 @@ def check_recovery(fund_name: str, current_dd: float, prev_drawdowns: dict) -> b
         return True
     return False
 
+
+# ─── WATCH / HOLD DETECTION ───────────────────────────────────────────────────
+
+def load_prev_signals() -> dict:
+    """Load previous day signal per fund."""
+    if not os.path.exists(PREV_SIGNAL_CSV):
+        return {}
+    result = {}
+    with open(PREV_SIGNAL_CSV, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            result[row["fund"]] = row["signal"]
+    return result
+
+def save_prev_signals(data: dict) -> None:
+    with open(PREV_SIGNAL_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["fund", "signal"])
+        writer.writeheader()
+        for fund, signal in data.items():
+            writer.writerow({"fund": fund, "signal": signal})
+
+def check_watch(fund_name: str, current_signal: str, prev_signals: dict) -> bool:
+    """Fire Watch alert when signal improves from Buy→None (dip over)."""
+    prev = prev_signals.get(fund_name, "None")
+    was_buy    = prev in ["Alert", "Buy", "Strong Buy", "Aggressive Buy"]
+    now_no_sig = current_signal == "None"
+    if was_buy and now_no_sig:
+        log.info(f"  Watch: {fund_name} | was {prev} → no signal now")
+        return True
+    return False
+
+def check_hold(fund_name: str, current_signal: str, prev_signals: dict, current_dd: float, prev_drawdowns: dict) -> bool:
+    """Fire Hold alert when recovery is happening but not yet at Watch level."""
+    prev_dd = prev_drawdowns.get(fund_name)
+    prev_sig = prev_signals.get(fund_name, "None")
+    if prev_dd is None:
+        return False
+    improvement  = prev_dd - current_dd
+    was_buy      = prev_sig in ["Buy", "Strong Buy", "Aggressive Buy"]
+    still_in_dip = current_dd >= 0.05
+    recovering   = improvement >= 0.03
+    if was_buy and still_in_dip and recovering:
+        log.info(f"  Hold: {fund_name} | DD improving {prev_dd:.2%} → {current_dd:.2%}")
+        return True
+    return False
+
 # ─── COOLDOWN ─────────────────────────────────────────────────────────────────
 
 def already_alerted_today(fund_name: str) -> bool:
@@ -447,30 +495,139 @@ def build_signal_message(fund_name, signal, current_nav, nav_date, vix, regime, 
     }.get(velocity["label"], "🔸 Slow bleed")
     velocity_detail = f"{abs(velocity['pct_5d']):.1f}% drop in 5 days" if velocity["pct_5d"] else ""
 
-    sep = "─" * 35
+    # MarkdownV2 — escape dynamic values
+    e = escape_md
+    sep = e("━" * 30)
 
     return (
-        f"📊 {label} — {fund_name}\n"
         f"{sep}\n"
-        f"Signal      : {signal_bar} {label}\n"
-        f"Confidence  : {confidence_bar(confidence)}\n"
-        f"Current NAV : ₹{current_nav:.4f}\n"
+        f"*{e(label.upper())}* 〡 *{e(fund_name)}*\n"
         f"{sep}\n"
-        f"DD (3M)     : {dd_3m:.1%} from 3M peak\n"
-        f"DD (6M)     : {dd_6m:.1%} from 6M peak\n"
-        f"Velocity    : {velocity_tag}  {velocity_detail}\n"
+        f"\n"
+        f"📊 *Signal Overview*\n"
+        f"  Strength  ›  {signal_bar} _{e(label)}_\n"
+        f"  Confidence›  {confidence_bar(confidence)}\n"
+        f"  NAV Today ›  *₹{e(str(round(current_nav, 4)))}*\n"
+        f"\n"
+        f"📉 *Drawdown*\n"
+        f"  3M Peak  ›  *{e(f'{dd_3m:.1%}')}* _{e('from 3M peak')}_\n"
+        f"  6M Peak  ›  *{e(f'{dd_6m:.1%}')}* _{e('from 6M peak')}_\n"
+        f"  Velocity ›  {velocity_tag}  _{e(velocity_detail)}_\n"
+        f"\n"
+        f"🌐 *Market Pulse*\n"
+        f"  VIX      ›  *{e(str(round(vix,2)))}*  {vix_tag}\n"
+        f"  Momentum ›  ↓ _Correction phase_\n"
+        f"  Regime   ›  {regime_tag}\n"
+        f"  Nifty 50 ›  {nifty_tag}  _{e(f'{nifty50_dd:.1%} from peak')}_\n"
+        f"\n"
+        f"💡 *Action*\n"
+        f"  *{e(alloc)} investment*{e(bear_tag)}\n"
+        f"\n"
         f"{sep}\n"
-        f"India VIX   : {vix:.2f}  {vix_tag}\n"
-        f"Momentum    : ↓ Correction phase\n"
-        f"Market      : {regime_tag}\n"
-        f"Nifty 50    : {nifty_tag}  ({nifty50_dd:.1%} from peak)\n"
-        f"{sep}\n"
-        f"Suggested   : {alloc} investment{bear_tag}\n"
-        f"{sep}\n"
-        f"NAV Date    : {nav_date}\n"
-        f"Alert Time  : {ist_now().strftime('%d %b %Y  %H:%M IST')}\n"
+        f"🗓 NAV Date   ›  _{e(nav_date)}_\n"
+        f"🕐 Alert Time ›  _{e(ist_now().strftime('%d %b %Y  %H:%M IST'))}_\n"
+        f"{sep}"
     )
 
+
+
+def build_watch_message(fund_name, current_nav, nav_date, dd_3m, dd_6m, regime, vix) -> str:
+    e = escape_md
+    sep = e("━" * 30)
+    regime_tag = {
+        "Bull":    f"🐂 Bull \({regime['pct_vs_ma']:+.1f}% vs 200DMA\)",
+        "Neutral": f"⚖️ Neutral \({regime['pct_vs_ma']:+.1f}% vs 200DMA\)",
+        "Bear":    f"🐻 Bear \({regime['pct_vs_ma']:+.1f}% vs 200DMA\)",
+    }.get(regime["label"], "")
+    return (
+        f"{sep}\n"
+        f"*WATCH* 〡 *{e(fund_name)}*\n"
+        f"{sep}\n"
+        f"\n"
+        f"🟦 *Dip opportunity has passed*\n"
+        f"  Market is recovering — stop fresh investments\n"
+        f"  Wait for the next dip opportunity\n"
+        f"\n"
+        f"📊 *Current Status*\n"
+        f"  NAV Today ›  *₹{e(str(round(current_nav, 4)))}*\n"
+        f"  DD \(3M\)  ›  {e(f'{dd_3m:.1%}')} from 3M peak\n"
+        f"  DD \(6M\)  ›  {e(f'{dd_6m:.1%}')} from 6M peak\n"
+        f"  VIX      ›  {e(str(round(vix, 2)))} — Low stress\n"
+        f"  Regime   ›  {regime_tag}\n"
+        f"\n"
+        f"{sep}\n"
+        f"🗓 NAV Date   ›  _{e(nav_date)}_\n"
+        f"🕐 Alert Time ›  _{e(ist_now().strftime('%d %b %Y  %H:%M IST'))}_\n"
+        f"{sep}"
+    )
+
+def build_hold_message(fund_name, current_nav, nav_date, dd_3m, dd_6m, prev_dd, regime, vix) -> str:
+    e = escape_md
+    sep = e("━" * 30)
+    improvement = prev_dd - max(dd_3m, dd_6m)
+    regime_tag = {
+        "Bull":    f"🐂 Bull \({regime['pct_vs_ma']:+.1f}% vs 200DMA\)",
+        "Neutral": f"⚖️ Neutral \({regime['pct_vs_ma']:+.1f}% vs 200DMA\)",
+        "Bear":    f"🐻 Bear \({regime['pct_vs_ma']:+.1f}% vs 200DMA\)",
+    }.get(regime["label"], "")
+    return (
+        f"{sep}\n"
+        f"*HOLD* 〡 *{e(fund_name)}*\n"
+        f"{sep}\n"
+        f"\n"
+        f"🟩 *Recovery in progress*\n"
+        f"  Fund is climbing back — stay invested\n"
+        f"  Do not panic sell\n"
+        f"\n"
+        f"📊 *Recovery Status*\n"
+        f"  NAV Today ›  *₹{e(str(round(current_nav, 4)))}*\n"
+        f"  DD \(3M\)  ›  {e(f'{dd_3m:.1%}')} from 3M peak\n"
+        f"  DD \(6M\)  ›  {e(f'{dd_6m:.1%}')} from 6M peak\n"
+        f"  Improved ›  *▲ {e(f'{improvement:.1%}')}* from yesterday\n"
+        f"  Regime   ›  {regime_tag}\n"
+        f"\n"
+        f"{sep}\n"
+        f"🗓 NAV Date   ›  _{e(nav_date)}_\n"
+        f"🕐 Alert Time ›  _{e(ist_now().strftime('%d %b %Y  %H:%M IST'))}_\n"
+        f"{sep}"
+    )
+
+
+def build_weekly_summary(funds_data: list) -> str:
+    """Weekly summary sent every Monday with status of all funds."""
+    e = escape_md
+    sep = e("━" * 30)
+    ist = ist_now()
+    lines = [
+        f"{sep}",
+        f"*📋 WEEKLY SUMMARY*",
+        f"_{e(ist.strftime('%d %b %Y'))} — Both Funds_",
+        f"{sep}",
+        f"",
+    ]
+    for fd in funds_data:
+        signal_emoji = {
+            "Aggressive Buy": "🟢🟢🟢🟢",
+            "Strong Buy":     "🟢🟢🟢⚪",
+            "Buy":            "🟢🟢⚪⚪",
+            "Alert":          "🟢⚪⚪⚪",
+            "None":           "⚪⚪⚪⚪",
+        }.get(fd["signal"], "⚪⚪⚪⚪")
+        lines += [
+            f"*{e(fd['fund_name'])}*",
+            f"  Signal  ›  {signal_emoji} _{e(fd['signal'])}_",
+            f"  NAV     ›  *₹{e(str(round(fd['nav'], 4)))}*",
+            f"  DD 3M   ›  {e(f"{fd['dd_3m']:.1%}")}",
+            f"  DD 6M   ›  {e(f"{fd['dd_6m']:.1%}")}",
+            f"  Regime  ›  {e(fd['regime'])}",
+            f"",
+        ]
+    lines += [
+        f"{sep}",
+        f"🕐 _{e(ist.strftime('%d %b %Y  %H:%M IST'))}_",
+        f"{sep}",
+    ]
+    return "\n".join(lines)
 
 def build_missed_nav_message() -> str:
     last_date = load_last_nav_date() or "Unknown"
@@ -522,13 +679,32 @@ def send_email(subject: str, body: str) -> None:
         server.sendmail(EMAIL_SENDER, EMAIL_RECIPIENT, msg.as_string())
     log.info("  Email sent.")
 
-def send_telegram(text: str) -> None:
-    url  = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10)
+def escape_md(text: str) -> str:
+    """Escape special characters for Telegram MarkdownV2."""
+    special = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!', '\\']
+    result = str(text)
+    for ch in special:
+        result = result.replace(ch, f"\{ch}")
+    return result
+
+def send_telegram(text: str, bot_token: str = "", chat_id: str = "") -> None:
+    if not bot_token or not chat_id:
+        log.warning("  Telegram skipped — bot_token or chat_id missing.")
+        return
+    url  = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    resp = requests.post(
+        url,
+        json={
+            "chat_id":    chat_id,
+            "text":       text,
+            "parse_mode": "MarkdownV2",
+        },
+        timeout=10,
+    )
     resp.raise_for_status()
     log.info("  Telegram message sent.")
 
-def notify(subject: str, msg: str) -> None:
+def notify(subject: str, msg: str, bot_token: str = "", chat_id: str = "") -> None:
     log.info(f"\n{'='*50}\n{msg}\n{'='*50}")
     if EMAIL_ENABLED:
         try:
@@ -537,7 +713,7 @@ def notify(subject: str, msg: str) -> None:
             log.error(f"  Email failed: {e}")
     if TELEGRAM_ENABLED:
         try:
-            send_telegram(msg)
+            send_telegram(msg, bot_token, chat_id)
         except Exception as e:
             log.error(f"  Telegram failed: {e}")
 
@@ -620,7 +796,9 @@ def main() -> None:
         log.info("Run complete — no new NAV today yet.")
         if FINAL_CHECK:
             log.info("  Final check — NAV still missing, sending alert.")
-            notify("[NAV Missing] No update received", build_missed_nav_message())
+            missed_msg = build_missed_nav_message()
+            for fname, fcfg in FUNDS.items():
+                notify("[NAV Missing] No update received", missed_msg, fcfg["bot_token"], fcfg["chat_id"])
         return
 
     log.info("Fetching India VIX...")
@@ -636,8 +814,13 @@ def main() -> None:
     momentum_neg  = index_momentum_is_negative(midcap_series)
 
     prev_drawdowns    = load_prev_drawdowns()
+    prev_signals      = load_prev_signals()
     current_drawdowns = {}
+    current_signals   = {}
     summary           = []
+
+    # ── Weekly summary check (Monday only) ──
+    is_monday = ist_now().weekday() == 0
 
     for fund_name, fund_cfg in FUNDS.items():
         log.info(f"\nProcessing: {fund_name}")
@@ -667,17 +850,21 @@ def main() -> None:
 
         if already_alerted_today(fund_name):
             log.info(f"  Cooldown active — already alerted for {fund_name} today.")
+            current_signals[fund_name] = prev_signals.get(fund_name, "None")
             continue
 
+        # ── Recovery (Hold) detection ──
         if check_recovery(fund_name, effective_dd, prev_drawdowns):
             msg = build_recovery_message(
                 fund_name, effective_dd,
                 prev_drawdowns[fund_name], current_nav, nav_date
             )
-            notify(f"[Recovery] {fund_name}", msg)
+            notify(f"[Recovery] {fund_name}", msg, fund_cfg["bot_token"], fund_cfg["chat_id"])
             mark_alerted_today(fund_name)
 
         signal = evaluate_signal(dd_3m, dd_6m, vix, momentum_neg)
+        signal_label = signal["label"] if signal else "None"
+        current_signals[fund_name] = signal_label
 
         if signal:
             signal     = adjust_for_regime(signal, regime)
@@ -686,10 +873,26 @@ def main() -> None:
                 fund_name, signal, current_nav, nav_date, vix,
                 regime, nifty50_dd, confidence, velocity,
             )
-            notify(f"[Dip Alert] {signal['label']} - {fund_name}", msg)
+            notify(f"[Dip Alert] {signal['label']} - {fund_name}", msg, fund_cfg["bot_token"], fund_cfg["chat_id"])
             mark_alerted_today(fund_name)
+
+        elif check_hold(fund_name, signal_label, prev_signals, effective_dd, prev_drawdowns):
+            msg = build_hold_message(
+                fund_name, current_nav, nav_date, dd_3m, dd_6m,
+                prev_drawdowns.get(fund_name, effective_dd), regime, vix
+            )
+            notify(f"[Hold] {fund_name}", msg, fund_cfg["bot_token"], fund_cfg["chat_id"])
+            mark_alerted_today(fund_name)
+
+        elif check_watch(fund_name, signal_label, prev_signals):
+            msg = build_watch_message(
+                fund_name, current_nav, nav_date, dd_3m, dd_6m, regime, vix
+            )
+            notify(f"[Watch] {fund_name}", msg, fund_cfg["bot_token"], fund_cfg["chat_id"])
+            mark_alerted_today(fund_name)
+
         else:
-            log.info(f"  No signal for {fund_name}.")
+            log.info(f"  No signal change for {fund_name}.")
 
         summary.append({
             "date":              run_date,
@@ -711,7 +914,26 @@ def main() -> None:
         })
 
     save_prev_drawdowns(current_drawdowns)
+    save_prev_signals(current_signals)
     mark_nav_processed()
+
+    # ── Weekly summary on Monday ──
+    if is_monday and summary:
+        funds_data = [
+            {
+                "fund_name": row["fund"],
+                "nav":       row["nav"],
+                "dd_3m":     row["dd_3m_pct"] / 100,
+                "dd_6m":     row["dd_6m_pct"] / 100,
+                "signal":    row["signal"],
+                "regime":    row["regime"],
+            }
+            for row in summary
+        ]
+        weekly_msg = build_weekly_summary(funds_data)
+        for fname, fcfg in FUNDS.items():
+            notify("[Weekly Summary]", weekly_msg, fcfg["bot_token"], fcfg["chat_id"])
+        log.info("  Weekly summary sent to all bots.")
 
     log_df = pd.DataFrame(summary)
     header = not os.path.exists(SIGNAL_LOG_CSV)
