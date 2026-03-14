@@ -534,10 +534,11 @@ def build_signal_message(fund_name, signal, current_nav, nav_date, vix, regime, 
 def build_watch_message(fund_name, current_nav, nav_date, dd_3m, dd_6m, regime, vix) -> str:
     e = escape_md
     sep = e("━" * 30)
+    pct = e(f"{regime['pct_vs_ma']:+.1f}%")
     regime_tag = {
-        "Bull":    f"🐂 Bull \({regime['pct_vs_ma']:+.1f}% vs 200DMA\)",
-        "Neutral": f"⚖️ Neutral \({regime['pct_vs_ma']:+.1f}% vs 200DMA\)",
-        "Bear":    f"🐻 Bear \({regime['pct_vs_ma']:+.1f}% vs 200DMA\)",
+        "Bull":    f"🐂 Bull \\({pct} vs 200DMA\\)",
+        "Neutral": f"⚖️ Neutral \\({pct} vs 200DMA\\)",
+        "Bear":    f"🐻 Bear \\({pct} vs 200DMA\\)",
     }.get(regime["label"], "")
     return (
         f"{sep}\n"
@@ -550,8 +551,8 @@ def build_watch_message(fund_name, current_nav, nav_date, dd_3m, dd_6m, regime, 
         f"\n"
         f"📊 *Current Status*\n"
         f"  NAV Today ›  *₹{e(str(round(current_nav, 4)))}*\n"
-        f"  DD \(3M\)  ›  {e(f'{dd_3m:.1%}')} from 3M peak\n"
-        f"  DD \(6M\)  ›  {e(f'{dd_6m:.1%}')} from 6M peak\n"
+        f"  DD 3M   ›  {e(f'{dd_3m:.1%}')} from 3M peak\n"
+        f"  DD 6M   ›  {e(f'{dd_6m:.1%}')} from 6M peak\n"
         f"  VIX      ›  {e(str(round(vix, 2)))} — Low stress\n"
         f"  Regime   ›  {regime_tag}\n"
         f"\n"
@@ -565,10 +566,11 @@ def build_hold_message(fund_name, current_nav, nav_date, dd_3m, dd_6m, prev_dd, 
     e = escape_md
     sep = e("━" * 30)
     improvement = prev_dd - max(dd_3m, dd_6m)
+    pct2 = e(f"{regime['pct_vs_ma']:+.1f}%")
     regime_tag = {
-        "Bull":    f"🐂 Bull \({regime['pct_vs_ma']:+.1f}% vs 200DMA\)",
-        "Neutral": f"⚖️ Neutral \({regime['pct_vs_ma']:+.1f}% vs 200DMA\)",
-        "Bear":    f"🐻 Bear \({regime['pct_vs_ma']:+.1f}% vs 200DMA\)",
+        "Bull":    f"🐂 Bull \\({pct2} vs 200DMA\\)",
+        "Neutral": f"⚖️ Neutral \\({pct2} vs 200DMA\\)",
+        "Bear":    f"🐻 Bear \\({pct2} vs 200DMA\\)",
     }.get(regime["label"], "")
     return (
         f"{sep}\n"
@@ -581,8 +583,8 @@ def build_hold_message(fund_name, current_nav, nav_date, dd_3m, dd_6m, prev_dd, 
         f"\n"
         f"📊 *Recovery Status*\n"
         f"  NAV Today ›  *₹{e(str(round(current_nav, 4)))}*\n"
-        f"  DD \(3M\)  ›  {e(f'{dd_3m:.1%}')} from 3M peak\n"
-        f"  DD \(6M\)  ›  {e(f'{dd_6m:.1%}')} from 6M peak\n"
+        f"  DD 3M   ›  {e(f'{dd_3m:.1%}')} from 3M peak\n"
+        f"  DD 6M   ›  {e(f'{dd_6m:.1%}')} from 6M peak\n"
         f"  Improved ›  *▲ {e(f'{improvement:.1%}')}* from yesterday\n"
         f"  Regime   ›  {regime_tag}\n"
         f"\n"
@@ -684,7 +686,7 @@ def escape_md(text: str) -> str:
     special = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!', '\\']
     result = str(text)
     for ch in special:
-        result = result.replace(ch, f"\{ch}")
+        result = result.replace(ch, '\\' + ch)
     return result
 
 def send_telegram(text: str, bot_token: str = "", chat_id: str = "") -> None:
