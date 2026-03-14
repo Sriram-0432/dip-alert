@@ -144,25 +144,28 @@ _amfi_history_cache: dict = {}
 def fetch_amfi_nav_all() -> dict:
     """
     Fetch current day NAV for all funds from AMFI directly.
-    Returns dict of {isin: nav_value}
+    Format: SchemeCode;ISIN_Growth;ISIN_Reinvest;SchemeName;NAV;Date
+    Returns dict of {isin: (nav_value, date_str)}
     """
     resp = requests.get(AMFI_ALL_NAV_URL, timeout=30)
     resp.raise_for_status()
     isin_nav = {}
     for line in resp.text.splitlines():
         parts = line.strip().split(";")
-        if len(parts) >= 5:
-            isin   = parts[2].strip()
-            isin2  = parts[3].strip()
-            nav_str = parts[4].strip()
-            try:
-                nav_val = float(nav_str)
-                if isin:
-                    isin_nav[isin]  = nav_val
-                if isin2:
-                    isin_nav[isin2] = nav_val
-            except ValueError:
-                continue
+        if len(parts) < 6:
+            continue
+        isin1   = parts[1].strip()
+        isin2   = parts[2].strip()
+        nav_str = parts[4].strip()
+        date_str = parts[5].strip()
+        try:
+            nav_val = float(nav_str)
+            if isin1 and isin1 != "-":
+                isin_nav[isin1] = (nav_val, date_str)
+            if isin2 and isin2 != "-":
+                isin_nav[isin2] = (nav_val, date_str)
+        except ValueError:
+            continue
     log.info(f"  AMFI NAV feed: {len(isin_nav)} records loaded")
     return isin_nav
 
@@ -201,10 +204,14 @@ def fetch_amfi_nav_history(fund_name: str, fund_cfg: dict) -> pd.Series:
         _amfi_history_cache = fetch_amfi_nav_all()
 
     if isin in _amfi_history_cache:
-        today = ist_now().date()
-        series[today] = _amfi_history_cache[isin]
+        nav_val, amfi_date_str = _amfi_history_cache[isin]
+        try:
+            amfi_date = datetime.strptime(amfi_date_str, "%d-%b-%Y").date()
+        except ValueError:
+            amfi_date = ist_now().date()
+        series[amfi_date] = nav_val
         series = series.sort_index()
-        log.info(f"  {fund_name}: AMFI NAV override → ₹{_amfi_history_cache[isin]:.4f} for {today}")
+        log.info(f"  {fund_name}: AMFI NAV override → ₹{nav_val:.4f} for {amfi_date}")
     else:
         log.warning(f"  {fund_name}: ISIN {isin} not found in AMFI feed — using mfapi latest")
 
@@ -555,22 +562,26 @@ def save_last_nav_date(date_str: str) -> None:
         f.write(date_str)
 
 def get_latest_nav_date() -> str:
-    """Check AMFI directly for today's NAV availability."""
+    """Check AMFI directly for today's NAV availability.
+    AMFI format: SchemeCode;ISIN_Growth;ISIN_Reinvest;SchemeName;NAV;Date
+    Date field is index 5, format: DD-Mon-YYYY e.g. 14-Mar-2026
+    """
     resp = requests.get(AMFI_ALL_NAV_URL, timeout=30)
     resp.raise_for_status()
-    # AMFI feed has a date header line like: "Scheme Code;ISIN...;NAV;Date"
-    # The date appears in data rows as last field
     for line in resp.text.splitlines():
         parts = line.strip().split(";")
-        if len(parts) >= 6:
-            date_str = parts[-1].strip()
-            try:
-                parsed = datetime.strptime(date_str, "%d-%b-%Y")
-                result = parsed.strftime("%d-%m-%Y")
-                log.info(f"  AMFI latest NAV date: {result}")
-                return result
-            except ValueError:
-                continue
+        if len(parts) < 6:
+            continue
+        date_str = parts[5].strip()
+        if not date_str or date_str == "Date":
+            continue
+        try:
+            parsed = datetime.strptime(date_str, "%d-%b-%Y")
+            result = parsed.strftime("%d-%m-%Y")
+            log.info(f"  AMFI latest NAV date: {result}")
+            return result
+        except ValueError:
+            continue
     return ""
 
 
