@@ -8,6 +8,10 @@ on:
         required: false
         default: 'false'
 
+# ── Grant write access to commit state files back to repo ──
+permissions:
+  contents: write
+
 jobs:
   run-alert:
     runs-on: ubuntu-latest
@@ -42,6 +46,7 @@ jobs:
         run: |
           git config user.email "action@github.com"
           git config user.name "GitHub Action"
-          git add last_nav_date.txt nav_processed.txt signal_log.csv prev_drawdown.csv alert_cooldown.csv || true
+          touch last_nav_date.txt nav_processed.txt signal_log.csv prev_drawdown.csv alert_cooldown.csv
+          git add last_nav_date.txt nav_processed.txt signal_log.csv prev_drawdown.csv alert_cooldown.csv
           git diff --cached --quiet || git commit -m "chore: update alert state [skip ci]"
           git push || true
