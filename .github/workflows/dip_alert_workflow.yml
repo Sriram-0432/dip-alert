@@ -1,21 +1,12 @@
 name: Mutual Fund Dip Alert
 
 on:
-  schedule:
-    # ── Peak window: every 30 mins, 6:00 PM – 11:30 PM IST ──
-    # 6:00 PM IST = 12:30 UTC  |  11:30 PM IST = 18:00 UTC
-    - cron: "30 12-17 * * 1-5"   # :30 past → 6:00, 6:30 ... 11:00 PM IST
-    - cron: "0 13-18 * * 1-5"    # :00 past → 6:30, 7:00 ... 11:30 PM IST
-
-    # ── Overnight window: every 2 hrs, 1:30 AM – 5:30 AM IST ──
-    # 1:30 AM IST = 20:00 UTC  |  5:30 AM IST = 00:00 UTC
-    - cron: "0 20,22,0 * * 2-6"  # 1:30 AM, 3:30 AM, 5:30 AM IST
-
-    # ── Final check: 7:30 AM IST = 02:00 UTC ──
-    # Sends missed NAV alert if NAV still not updated overnight
-    - cron: "0 2 * * 2-6"
-
   workflow_dispatch:
+    inputs:
+      final_check:
+        description: 'Is this the final check of the day?'
+        required: false
+        default: 'false'
 
 jobs:
   run-alert:
@@ -43,7 +34,7 @@ jobs:
           TELEGRAM_ENABLED:   ${{ secrets.TELEGRAM_ENABLED }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-          FINAL_CHECK: ${{ (github.event.schedule == '0 2 * * 2-6') && 'true' || 'false' }}
+          FINAL_CHECK:        ${{ github.event.inputs.final_check }}
         run: python dip_alert.py
 
       - name: Commit state files
