@@ -40,17 +40,18 @@ import yfinance as yf
 
 FUNDS = {
     "Motilal Oswal Midcap Fund": {
-        "isin": "INF247L01445",
-        "short_name": "MO_Midcap",
+        "scheme_code": "127042",
+        "isin":        "INF247L01445",
+        "short_name":  "MO_Midcap",
     },
     "Parag Parikh Flexi Cap Fund": {
-        "isin": "INF879O01019",
-        "short_name": "PP_FlexiCap",
+        "scheme_code": "122639",
+        "isin":        "INF879O01019",
+        "short_name":  "PP_FlexiCap",
     },
 }
 
-# AMFI NAV API — official source, no delay
-AMFI_NAV_URL = "https://api.mfapi.in/mf/search"  # replaced below
+# AMFI NAV feed — official source, no delay
 AMFI_ALL_NAV_URL = "https://www.amfiindia.com/spages/NAVAll.txt"
 
 NIFTY50_TICKER   = "^NSEI"
@@ -176,18 +177,10 @@ def fetch_amfi_nav_history(fund_name: str, fund_cfg: dict) -> pd.Series:
     """
     global _amfi_history_cache
 
-    # Step 1: Get historical data from mfapi (for 3M/6M peak calculations)
-    # We still need history — AMFI only gives today's NAV, not history
-    isin = fund_cfg["isin"]
-
-    # Search mfapi by ISIN to get scheme code
-    search_url = f"https://api.mfapi.in/mf/search?q={isin}"
-    resp = requests.get(search_url, timeout=15)
-    resp.raise_for_status()
-    results = resp.json()
-    if not results:
-        raise ValueError(f"No scheme found for ISIN {isin}")
-    scheme_code = results[0]["schemeCode"]
+    # Step 1: Get historical data from mfapi using direct scheme code
+    # AMFI only gives today's NAV — mfapi provides full history for drawdown calc
+    isin        = fund_cfg["isin"]
+    scheme_code = fund_cfg["scheme_code"]
 
     hist_url = f"https://api.mfapi.in/mf/{scheme_code}"
     resp2 = requests.get(hist_url, timeout=15)
