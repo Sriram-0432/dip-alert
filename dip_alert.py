@@ -48,7 +48,7 @@ FUNDS = {
     },
     "Parag Parikh Flexi Cap Fund": {
         "scheme_code": "122639",
-        "isin":        "INF879O01019",
+        "isin":        "INF879O01027",
         "short_name":  "PP_FlexiCap",
         "bot_token":   os.getenv("TELEGRAM_BOT_TOKEN_PP", ""),
         "chat_id":     os.getenv("TELEGRAM_CHAT_ID_PP", ""),
@@ -843,7 +843,13 @@ def main() -> None:
             continue
 
         current_nav  = float(nav_series.iloc[-1])
-        nav_date     = nav_series.index[-1].strftime("%d %b %Y") if hasattr(nav_series.index[-1], "strftime") else str(nav_series.index[-1])
+        # Use AMFI detected date as nav_date (reliable across all funds)
+        _amfi_date   = load_last_nav_date()  # format DD-MM-YYYY
+        try:
+            from datetime import datetime as _dt
+            nav_date = _dt.strptime(_amfi_date, "%d-%m-%Y").strftime("%d %b %Y")
+        except Exception:
+            nav_date = nav_series.index[-1].strftime("%d %b %Y") if hasattr(nav_series.index[-1], "strftime") else str(nav_series.index[-1])
         peak_3m      = rolling_peak(nav_series, PEAK_WINDOWS["3m"])
         peak_6m      = rolling_peak(nav_series, PEAK_WINDOWS["6m"])
         dd_3m        = drawdown(current_nav, peak_3m)
@@ -907,6 +913,7 @@ def main() -> None:
 
         summary.append({
             "date":              run_date,
+            "nav_date":          nav_date,
             "fund":              fund_name,
             "nav":               current_nav,
             "peak_3m":           peak_3m,
