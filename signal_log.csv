@@ -5,3 +5,5 @@ date,nav_date,fund,nav,peak_3m,dd_3m_pct,peak_6m,dd_6m_pct,vix,regime,nifty50_dd
 2026-03-16,16 Mar 2026,Parag Parikh Flexi Cap Fund,88.1632,95.3441,7.53,95.7732,7.95,21.6,Bear,11.09,True,Alert,,49,Slow bleed,-1.79
 2026-03-17,17 Mar 2026,Motilal Oswal Midcap Fund,96.876,116.1548,16.6,122.513,20.93,19.79,Bear,10.44,False,None,None,0,Slow bleed,-0.66
 2026-03-17,17 Mar 2026,Parag Parikh Flexi Cap Fund,88.7044,95.3441,6.96,95.7732,7.38,19.79,Bear,10.44,False,None,None,0,Slow bleed,-1.91
+2026-03-18,18 Mar 2026,Motilal Oswal Midcap Fund,99.4352,116.1548,14.39,121.3402,18.05,18.72,Bear,9.69,False,None,None,0,Slow bleed,2.45
+2026-03-18,18 Mar 2026,Parag Parikh Flexi Cap Fund,89.0865,95.3441,6.56,95.7732,6.98,18.72,Bear,9.69,False,None,None,0,Slow bleed,-0.71
