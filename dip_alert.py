@@ -742,26 +742,44 @@ def save_last_nav_date(date_str: str) -> None:
         f.write(date_str)
 
 def get_latest_nav_date() -> str:
-    """Check AMFI directly for today's NAV availability.
-    AMFI format: SchemeCode;ISIN_Growth;ISIN_Reinvest;SchemeName;NAV;Date
-    Date field is index 5, format: DD-Mon-YYYY e.g. 14-Mar-2026
+    """Check latest NAV date using mfapi.in (reliable, no geo-restriction).
+    Falls back to AMFI direct feed if mfapi fails.
     """
-    resp = requests.get(AMFI_ALL_NAV_URL, timeout=30)
-    resp.raise_for_status()
-    for line in resp.text.splitlines():
-        parts = line.strip().split(";")
-        if len(parts) < 6:
-            continue
-        date_str = parts[5].strip()
-        if not date_str or date_str == "Date":
-            continue
-        try:
-            parsed = datetime.strptime(date_str, "%d-%b-%Y")
-            result = parsed.strftime("%d-%m-%Y")
-            log.info(f"  AMFI latest NAV date: {result}")
-            return result
-        except ValueError:
-            continue
+    # Primary: mfapi.in — always accessible from GitHub Actions
+    try:
+        first_scheme = list(FUNDS.values())[0]["scheme_code"]
+        url  = f"https://api.mfapi.in/mf/{first_scheme}"
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        if data:
+            date_str = data[0]["date"]  # format: DD-MM-YYYY
+            log.info(f"  Latest NAV date (mfapi): {date_str}")
+            return date_str
+    except Exception as e:
+        log.warning(f"  mfapi date check failed: {e} — trying AMFI direct")
+
+    # Fallback: AMFI direct feed
+    try:
+        resp = requests.get(AMFI_ALL_NAV_URL, timeout=30)
+        resp.raise_for_status()
+        for line in resp.text.splitlines():
+            parts = line.strip().split(";")
+            if len(parts) < 6:
+                continue
+            date_str = parts[5].strip()
+            if not date_str or date_str == "Date":
+                continue
+            try:
+                parsed = datetime.strptime(date_str, "%d-%b-%Y")
+                result = parsed.strftime("%d-%m-%Y")
+                log.info(f"  Latest NAV date (AMFI): {result}")
+                return result
+            except ValueError:
+                continue
+    except Exception as e:
+        log.warning(f"  AMFI date check failed: {e}")
+
     return ""
 
 
