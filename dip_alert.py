@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 “””
-Mutual Fund Dip Alert System — v3.0
+Mutual Fund Dip Alert System - v3.0
 Monitors: Motilal Oswal Midcap Fund, Parag Parikh Flexi Cap Fund
 
 Upgrades in v2.0:
@@ -39,7 +39,7 @@ import requests
 import pandas as pd
 import yfinance as yf
 
-# ─── CONFIGURATION ────────────────────────────────────────────────────────────
+# — CONFIGURATION —
 
 FUNDS = {
 “Motilal Oswal Midcap Fund”: {
@@ -58,7 +58,7 @@ FUNDS = {
 },
 }
 
-# AMFI NAV feed — official source, no delay
+# AMFI NAV feed - official source, no delay
 
 AMFI_ALL_NAV_URL = “https://www.amfiindia.com/spages/NAVAll.txt”
 
@@ -107,7 +107,7 @@ VELOCITY_WINDOW_SLOW   = 10  # days
 VELOCITY_CRASH_FAST    = 0.05  # 5% drop in 5 days
 VELOCITY_CRASH_SLOW    = 0.08  # 8% drop in 10 days
 
-# ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
+# — NOTIFICATIONS —
 
 EMAIL_ENABLED      = os.getenv(“EMAIL_ENABLED”, “false”).lower() == “true”
 EMAIL_SENDER       = os.getenv(“EMAIL_SENDER”, “”)
@@ -127,7 +127,7 @@ PREV_SIGNAL_CSV     = “prev_signal.csv”
 FINAL_CHECK         = os.getenv(“FINAL_CHECK”, “false”).lower() == “true”
 NAV_PROCESSED_FILE  = “nav_processed.txt”
 
-# ─── LOGGING ──────────────────────────────────────────────────────────────────
+# — LOGGING —
 
 logging.basicConfig(
 level=logging.INFO,
@@ -139,7 +139,7 @@ logging.StreamHandler(stream=sys.stdout),
 )
 log = logging.getLogger(**name**)
 
-# ─── HELPERS ──────────────────────────────────────────────────────────────────
+# — HELPERS —
 
 def ist_now() -> datetime:
 return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
@@ -147,9 +147,9 @@ return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
 def today_str() -> str:
 return ist_now().strftime(”%Y-%m-%d”)
 
-# ─── DATA FETCHING ────────────────────────────────────────────────────────────
+# — DATA FETCHING —
 
-# ─── AMFI NAV CACHE (shared across funds per run) ─────────────────────────────
+# — AMFI NAV CACHE (shared across funds per run) —
 
 _amfi_history_cache: dict = {}
 
@@ -190,7 +190,7 @@ global _amfi_history_cache
 
 ```
 # Step 1: Get historical data from mfapi using direct scheme code
-# AMFI only gives today's NAV — mfapi provides full history for drawdown calc
+# AMFI only gives today's NAV - mfapi provides full history for drawdown calc
 isin        = fund_cfg["isin"]
 scheme_code = fund_cfg["scheme_code"]
 
@@ -225,16 +225,16 @@ if isin in _amfi_history_cache:
         amfi_date = ist_now().date()
     series[amfi_date] = nav_val
     series = series.sort_index()
-    log.info(f"  {fund_name}: AMFI NAV override → ₹{nav_val:.4f} for {amfi_date}")
+    log.info(f"  {fund_name}: AMFI NAV override ? ?{nav_val:.4f} for {amfi_date}")
 else:
-    log.warning(f"  {fund_name}: ISIN {isin} not found in AMFI feed — using mfapi latest")
+    log.warning(f"  {fund_name}: ISIN {isin} not found in AMFI feed - using mfapi latest")
 
 log.info(f"  {fund_name}: {len(series)} NAV records, latest = {series.iloc[-1]:.4f}")
 return series
 ```
 
 def fetch_nav_history(fund_name: str, fund_cfg: dict) -> pd.Series:
-“”“Wrapper — fetches from AMFI directly with mfapi history.”””
+“”“Wrapper - fetches from AMFI directly with mfapi history.”””
 return fetch_amfi_nav_history(fund_name, fund_cfg)
 
 def fetch_yf(ticker: str, period: str = “1y”) -> pd.Series:
@@ -260,7 +260,7 @@ except Exception:
 log.warning(”  Midcap 150 failed, falling back to Nifty 50”)
 return fetch_yf(NIFTY50_TICKER, period=“3mo”)
 
-# ─── CALCULATIONS ─────────────────────────────────────────────────────────────
+# — CALCULATIONS —
 
 def rolling_peak(nav: pd.Series, window_days: int) -> float:
 return float(nav.iloc[-window_days:].max())
@@ -270,7 +270,7 @@ return (peak - current) / peak if peak > 0 else 0.0
 
 def index_momentum_is_negative(index_series: pd.Series) -> bool:
 if len(index_series) < MOMENTUM_LOOKBACK_DAYS + 1:
-log.warning(”  Not enough data for momentum — defaulting False”)
+log.warning(”  Not enough data for momentum - defaulting False”)
 return False
 recent = index_series.iloc[-MOMENTUM_LOOKBACK_DAYS:]
 start, end = float(recent.iloc[0]), float(recent.iloc[-1])
@@ -280,7 +280,7 @@ return change < -MOMENTUM_DROP_THRESHOLD
 
 def get_market_regime(nifty50_series: pd.Series) -> dict:
 if len(nifty50_series) < MA_WINDOW:
-log.warning(”  Not enough data for 200DMA — defaulting Neutral”)
+log.warning(”  Not enough data for 200DMA - defaulting Neutral”)
 return {“label”: “Neutral”, “pct_vs_ma”: 0.0}
 ma200   = float(nifty50_series.iloc[-MA_WINDOW:].mean())
 current = float(nifty50_series.iloc[-1])
@@ -306,10 +306,10 @@ return “Correction”
 else:
 return “Normal”
 
-# ─── CRASH VELOCITY ───────────────────────────────────────────────────────────
+# — CRASH VELOCITY —
 
 def calculate_crash_velocity(nav: pd.Series) -> dict:
-“”“Measures speed of the fall — fast crash vs slow bleed.”””
+“”“Measures speed of the fall - fast crash vs slow bleed.”””
 result = {“label”: “Slow bleed”, “pct_5d”: 0.0, “pct_10d”: 0.0, “is_crash”: False}
 
 ```
@@ -337,7 +337,7 @@ log.info(f"  Crash velocity: {result['label']} | 5d={result['pct_5d']:.2f}% | 10
 return result
 ```
 
-# ─── CONFIDENCE SCORE ─────────────────────────────────────────────────────────
+# — CONFIDENCE SCORE —
 
 def calculate_confidence(effective_dd: float, vix: float, momentum_negative: bool, regime: dict, velocity: dict = None) -> int:
 dd_score       = min(effective_dd / 0.20, 1.0)
@@ -354,7 +354,7 @@ velocity_score * CONFIDENCE_WEIGHTS[“velocity”]
 )
 return round(raw * 100)
 
-# ─── SIGNAL LOGIC ─────────────────────────────────────────────────────────────
+# — SIGNAL LOGIC —
 
 def evaluate_signal(dd_3m: float, dd_6m: float, vix: float, momentum_negative: bool) -> dict | None:
 if not momentum_negative:
@@ -373,7 +373,7 @@ log.info(f”  Bear market: allocation downgraded {original} -> {adjusted}”)
 return {**signal, “allocation”: adjusted, “bear_adjusted”: True}
 return {**signal, “bear_adjusted”: False}
 
-# ─── RECOVERY DETECTION ───────────────────────────────────────────────────────
+# — RECOVERY DETECTION —
 
 def load_prev_drawdowns() -> dict:
 if not os.path.exists(PREV_DRAWDOWN_CSV):
@@ -403,7 +403,7 @@ log.info(f”  Recovery: {fund_name} | {prev_dd:.2%} -> {current_dd:.2%} | impro
 return True
 return False
 
-# ─── WATCH / HOLD DETECTION ───────────────────────────────────────────────────
+# — WATCH / HOLD DETECTION —
 
 def load_prev_signals() -> dict:
 “”“Load previous day signal per fund.”””
@@ -423,12 +423,12 @@ for fund, signal in data.items():
 writer.writerow({“fund”: fund, “signal”: signal})
 
 def check_watch(fund_name: str, current_signal: str, prev_signals: dict) -> bool:
-“”“Fire Watch alert when signal improves from Buy→None (dip over).”””
+“”“Fire Watch alert when signal improves from Buy?None (dip over).”””
 prev = prev_signals.get(fund_name, “None”)
 was_buy    = prev in [“Alert”, “Buy”, “Strong Buy”, “Aggressive Buy”]
 now_no_sig = current_signal == “None”
 if was_buy and now_no_sig:
-log.info(f”  Watch: {fund_name} | was {prev} → no signal now”)
+log.info(f”  Watch: {fund_name} | was {prev} ? no signal now”)
 return True
 return False
 
@@ -443,11 +443,11 @@ was_buy      = prev_sig in [“Buy”, “Strong Buy”, “Aggressive Buy”]
 still_in_dip = current_dd >= 0.05
 recovering   = improvement >= 0.03
 if was_buy and still_in_dip and recovering:
-log.info(f”  Hold: {fund_name} | DD improving {prev_dd:.2%} → {current_dd:.2%}”)
+log.info(f”  Hold: {fund_name} | DD improving {prev_dd:.2%} ? {current_dd:.2%}”)
 return True
 return False
 
-# ─── COOLDOWN ─────────────────────────────────────────────────────────────────
+# — COOLDOWN —
 
 def already_alerted_today(fund_name: str) -> bool:
 if not os.path.exists(COOLDOWN_CSV):
@@ -472,184 +472,184 @@ if not file_exists:
 writer.writeheader()
 writer.writerow({“date”: today_str(), “fund”: fund_name})
 
-# ─── MESSAGE BUILDERS ─────────────────────────────────────────────────────────
+# — MESSAGE BUILDERS —
 
 def confidence_bar(score: int) -> str:
 filled = round(score / 20)
-return “🟩” * filled + “⬜” * (5 - filled) + f”  {score}%”
+return “?” * filled + “?” * (5 - filled) + f”  {score}%”
 
 def build_signal_message(fund_name, signal, current_nav, nav_date, vix, regime, nifty50_dd, confidence, velocity) -> str:
 label    = signal[“label”]
 dd_3m    = signal[“dd_3m”]
 dd_6m    = signal[“dd_6m”]
 alloc    = signal.get(“allocation”) or “Watch”
-bear_tag = “ ⚠️ Bear adjusted” if signal.get(“bear_adjusted”) else “”
+bear_tag = “ ?? Bear adjusted” if signal.get(“bear_adjusted”) else “”
 
 ```
 signal_bar = {
-    "Alert":          "🟢⚪⚪⚪",
-    "Buy":            "🟢🟢⚪⚪",
-    "Strong Buy":     "🟢🟢🟢⚪",
-    "Aggressive Buy": "🟢🟢🟢🟢",
-}.get(label, "⚪⚪⚪⚪")
+    "Alert":          "????",
+    "Buy":            "????",
+    "Strong Buy":     "????",
+    "Aggressive Buy": "????",
+}.get(label, "????")
 
 vix_tag = (
-    "🔵 Calm"            if vix < 14 else
-    "🟡 Moderate"        if vix < 19 else
-    "🟠 Elevated stress" if vix < 23 else
-    "🔴 Panic zone"
+    "? Calm"            if vix < 14 else
+    "? Moderate"        if vix < 19 else
+    "? Elevated stress" if vix < 23 else
+    "? Panic zone"
 )
 
 _pct = f"{regime['pct_vs_ma']:+.1f}%"
 regime_tag = {
-    "Bull":    f"🐂 <b>Bull</b>  ({_pct} vs 200DMA)",
-    "Neutral": f"⚖️ <b>Neutral</b>  ({_pct} vs 200DMA)",
-    "Bear":    f"🐻 <b>Bear</b>  ({_pct} vs 200DMA)",
+    "Bull":    f"? <b>Bull</b>  ({_pct} vs 200DMA)",
+    "Neutral": f"?? <b>Neutral</b>  ({_pct} vs 200DMA)",
+    "Bear":    f"? <b>Bear</b>  ({_pct} vs 200DMA)",
 }.get(regime["label"], "")
 
 nifty_phase = nifty50_market_phase(nifty50_dd)
 nifty_tag = {
-    "Normal":            "🟢 Stable",
-    "Correction":        "🟡 Correction",
-    "Deeper correction": "🟠 Deeper correction",
-    "Panic":             "🔴 Panic",
+    "Normal":            "? Stable",
+    "Correction":        "? Correction",
+    "Deeper correction": "? Deeper correction",
+    "Panic":             "? Panic",
 }.get(nifty_phase, nifty_phase)
 
 velocity_tag = {
-    "Fast crash":   "⚡ Fast crash",
-    "Accelerating": "🔺 Accelerating",
-    "Slow bleed":   "🔸 Slow bleed",
-}.get(velocity["label"], "🔸 Slow bleed")
+    "Fast crash":   "? Fast crash",
+    "Accelerating": "? Accelerating",
+    "Slow bleed":   "? Slow bleed",
+}.get(velocity["label"], "? Slow bleed")
 velocity_detail = f"{abs(velocity['pct_5d']):.1f}% drop in 5 days" if velocity["pct_5d"] else ""
 
-sep = "━" * 30
+sep = "?" * 30
 
 return (
     f"{sep}\n"
-    f"<b>{escape_md(label.upper())}</b> 〡 <b>{escape_md(fund_name)}</b>\n"
+    f"<b>{escape_md(label.upper())}</b> ? <b>{escape_md(fund_name)}</b>\n"
     f"{sep}\n"
     f"\n"
-    f"📊 <b>Signal Overview</b>\n"
-    f"  Strength   ›  {signal_bar} <i>{escape_md(label)}</i>\n"
-    f"  Confidence ›  {confidence_bar(confidence)}\n"
-    f"  NAV Today  ›  <b>₹{round(current_nav, 4)}</b>\n"
+    f"? <b>Signal Overview</b>\n"
+    f"  Strength   ?  {signal_bar} <i>{escape_md(label)}</i>\n"
+    f"  Confidence ?  {confidence_bar(confidence)}\n"
+    f"  NAV Today  ?  <b>?{round(current_nav, 4)}</b>\n"
     f"\n"
-    f"📉 <b>Drawdown</b>\n"
-    f"  3M Peak  ›  <b>{dd_3m:.1%}</b> <i>from 3M peak</i>\n"
-    f"  6M Peak  ›  <b>{dd_6m:.1%}</b> <i>from 6M peak</i>\n"
-    f"  Velocity ›  {velocity_tag}  <i>{escape_md(velocity_detail)}</i>\n"
+    f"? <b>Drawdown</b>\n"
+    f"  3M Peak  ?  <b>{dd_3m:.1%}</b> <i>from 3M peak</i>\n"
+    f"  6M Peak  ?  <b>{dd_6m:.1%}</b> <i>from 6M peak</i>\n"
+    f"  Velocity ?  {velocity_tag}  <i>{escape_md(velocity_detail)}</i>\n"
     f"\n"
-    f"🌐 <b>Market Pulse</b>\n"
-    f"  VIX      ›  <b>{vix:.2f}</b>  {vix_tag}\n"
-    f"  Momentum ›  ↓ <i>Correction phase</i>\n"
-    f"  Regime   ›  {regime_tag}\n"
-    f"  Nifty 50 ›  {nifty_tag}  <i>{nifty50_dd:.1%} from peak</i>\n"
+    f"? <b>Market Pulse</b>\n"
+    f"  VIX      ?  <b>{vix:.2f}</b>  {vix_tag}\n"
+    f"  Momentum ?  ? <i>Correction phase</i>\n"
+    f"  Regime   ?  {regime_tag}\n"
+    f"  Nifty 50 ?  {nifty_tag}  <i>{nifty50_dd:.1%} from peak</i>\n"
     f"\n"
-    f"💡 <b>Action</b>\n"
+    f"? <b>Action</b>\n"
     f"  <b>{escape_md(alloc)} investment</b>{escape_md(bear_tag)}\n"
     f"\n"
     f"{sep}\n"
-    f"🗓 NAV Date   ›  <i>{escape_md(nav_date)}</i>\n"
-    f"🕐 Alert Time ›  <i>{ist_now().strftime('%d %b %Y  %H:%M IST')}</i>\n"
+    f"? NAV Date   ?  <i>{escape_md(nav_date)}</i>\n"
+    f"? Alert Time ?  <i>{ist_now().strftime('%d %b %Y  %H:%M IST')}</i>\n"
     f"{sep}"
 )
 ```
 
 def build_watch_message(fund_name, current_nav, nav_date, dd_3m, dd_6m, regime, vix) -> str:
 e = escape_md
-sep = e(“━” * 30)
+sep = e(”?” * 30)
 pct = e(f”{regime[‘pct_vs_ma’]:+.1f}%”)
 regime_tag = {
-“Bull”:    f”🐂 Bull \({pct} vs 200DMA\)”,
-“Neutral”: f”⚖️ Neutral \({pct} vs 200DMA\)”,
-“Bear”:    f”🐻 Bear \({pct} vs 200DMA\)”,
+“Bull”:    f”? Bull \({pct} vs 200DMA\)”,
+“Neutral”: f”?? Neutral \({pct} vs 200DMA\)”,
+“Bear”:    f”? Bear \({pct} vs 200DMA\)”,
 }.get(regime[“label”], “”)
-sep2 = “━” * 30
+sep2 = “?” * 30
 return (
 f”{sep2}\n”
-f”<b>WATCH</b> 〡 <b>{escape_md(fund_name)}</b>\n”
+f”<b>WATCH</b> ? <b>{escape_md(fund_name)}</b>\n”
 f”{sep2}\n”
 f”\n”
-f”🟦 <b>Dip opportunity has passed</b>\n”
-f”  Market is recovering — stop fresh investments\n”
+f”? <b>Dip opportunity has passed</b>\n”
+f”  Market is recovering - stop fresh investments\n”
 f”  Wait for the next dip opportunity\n”
 f”\n”
-f”📊 <b>Current Status</b>\n”
-f”  NAV Today ›  <b>₹{round(current_nav, 4)}</b>\n”
-f”  DD 3M     ›  <b>{dd_3m:.1%}</b> from 3M peak\n”
-f”  DD 6M     ›  <b>{dd_6m:.1%}</b> from 6M peak\n”
-f”  VIX       ›  {round(vix, 2)} — Low stress\n”
-f”  Regime    ›  {regime_tag}\n”
+f”? <b>Current Status</b>\n”
+f”  NAV Today ?  <b>?{round(current_nav, 4)}</b>\n”
+f”  DD 3M     ?  <b>{dd_3m:.1%}</b> from 3M peak\n”
+f”  DD 6M     ?  <b>{dd_6m:.1%}</b> from 6M peak\n”
+f”  VIX       ?  {round(vix, 2)} - Low stress\n”
+f”  Regime    ?  {regime_tag}\n”
 f”\n”
 f”{sep2}\n”
-f”🗓 NAV Date   ›  <i>{escape_md(nav_date)}</i>\n”
-f”🕐 Alert Time ›  <i>{ist_now().strftime(’%d %b %Y  %H:%M IST’)}</i>\n”
+f”? NAV Date   ?  <i>{escape_md(nav_date)}</i>\n”
+f”? Alert Time ?  <i>{ist_now().strftime(’%d %b %Y  %H:%M IST’)}</i>\n”
 f”{sep2}”
 )
 
 def build_hold_message(fund_name, current_nav, nav_date, dd_3m, dd_6m, prev_dd, regime, vix) -> str:
 e = escape_md
-sep = e(“━” * 30)
+sep = e(”?” * 30)
 improvement = prev_dd - max(dd_3m, dd_6m)
 pct2 = e(f”{regime[‘pct_vs_ma’]:+.1f}%”)
 regime_tag = {
-“Bull”:    f”🐂 Bull \({pct2} vs 200DMA\)”,
-“Neutral”: f”⚖️ Neutral \({pct2} vs 200DMA\)”,
-“Bear”:    f”🐻 Bear \({pct2} vs 200DMA\)”,
+“Bull”:    f”? Bull \({pct2} vs 200DMA\)”,
+“Neutral”: f”?? Neutral \({pct2} vs 200DMA\)”,
+“Bear”:    f”? Bear \({pct2} vs 200DMA\)”,
 }.get(regime[“label”], “”)
 return (
 f”{sep}\n”
-f”<b>HOLD</b> 〡 <b>{escape_md(fund_name)}</b>\n”
+f”<b>HOLD</b> ? <b>{escape_md(fund_name)}</b>\n”
 f”{sep}\n”
 f”\n”
-f”🟩 *Recovery in progress*\n”
-f”  Fund is climbing back — stay invested\n”
+f”? *Recovery in progress*\n”
+f”  Fund is climbing back - stay invested\n”
 f”  Do not panic sell\n”
 f”\n”
-f”📊 *Recovery Status*\n”
-f”  NAV Today ›  *₹{e(str(round(current_nav, 4)))}*\n”
-f”  DD 3M   ›  {e(f’{dd_3m:.1%}’)} from 3M peak\n”
-f”  DD 6M   ›  {e(f’{dd_6m:.1%}’)} from 6M peak\n”
-f”  Improved ›  *▲ {e(f’{improvement:.1%}’)}* from yesterday\n”
-f”  Regime   ›  {regime_tag}\n”
+f”? *Recovery Status*\n”
+f”  NAV Today ?  *?{e(str(round(current_nav, 4)))}*\n”
+f”  DD 3M   ?  {e(f’{dd_3m:.1%}’)} from 3M peak\n”
+f”  DD 6M   ?  {e(f’{dd_6m:.1%}’)} from 6M peak\n”
+f”  Improved ?  *? {e(f’{improvement:.1%}’)}* from yesterday\n”
+f”  Regime   ?  {regime_tag}\n”
 f”\n”
 f”{sep}\n”
-f”🗓 NAV Date   ›  *{e(nav_date)}*\n”
-f”🕐 Alert Time ›  *{e(ist_now().strftime(’%d %b %Y  %H:%M IST’))}*\n”
+f”? NAV Date   ?  *{e(nav_date)}*\n”
+f”? Alert Time ?  *{e(ist_now().strftime(’%d %b %Y  %H:%M IST’))}*\n”
 f”{sep}”
 )
 
 def build_weekly_summary(funds_data: list) -> str:
 “”“Weekly summary sent every Monday with status of all funds.”””
-sep = “━” * 30
+sep = “?” * 30
 ist = ist_now()
 lines = [
 sep,
-f”<b>📋 WEEKLY SUMMARY</b>”,
-f”<i>{ist.strftime(’%d %b %Y’)} — Both Funds</i>”,
+f”<b>? WEEKLY SUMMARY</b>”,
+f”<i>{ist.strftime(’%d %b %Y’)} - Both Funds</i>”,
 sep,
 “”,
 ]
 for fd in funds_data:
 signal_emoji = {
-“Aggressive Buy”: “🟢🟢🟢🟢”,
-“Strong Buy”:     “🟢🟢🟢⚪”,
-“Buy”:            “🟢🟢⚪⚪”,
-“Alert”:          “🟢⚪⚪⚪”,
-“None”:           “⚪⚪⚪⚪”,
-}.get(fd[“signal”], “⚪⚪⚪⚪”)
+“Aggressive Buy”: “????”,
+“Strong Buy”:     “????”,
+“Buy”:            “????”,
+“Alert”:          “????”,
+“None”:           “????”,
+}.get(fd[“signal”], “????”)
 lines += [
 f”<b>{escape_md(fd[‘fund_name’])}</b>”,
-f”  Signal  ›  {signal_emoji} <i>{escape_md(fd[‘signal’])}</i>”,
-f”  NAV     ›  <b>₹{round(fd[‘nav’], 4)}</b>”,
-f”  DD 3M   ›  {fd[‘dd_3m’]:.1%}”,
-f”  DD 6M   ›  {fd[‘dd_6m’]:.1%}”,
-f”  Regime  ›  {escape_md(fd[‘regime’])}”,
+f”  Signal  ?  {signal_emoji} <i>{escape_md(fd[‘signal’])}</i>”,
+f”  NAV     ?  <b>?{round(fd[‘nav’], 4)}</b>”,
+f”  DD 3M   ?  {fd[‘dd_3m’]:.1%}”,
+f”  DD 6M   ?  {fd[‘dd_6m’]:.1%}”,
+f”  Regime  ?  {escape_md(fd[‘regime’])}”,
 “”,
 ]
 lines += [
 sep,
-f”🕐 <i>{ist.strftime(’%d %b %Y  %H:%M IST’)}</i>”,
+f”? <i>{ist.strftime(’%d %b %Y  %H:%M IST’)}</i>”,
 sep,
 ]
 return “\n”.join(lines)
@@ -658,9 +658,9 @@ def build_missed_nav_message() -> str:
 last_date = load_last_nav_date() or “Unknown”
 ist        = ist_now()
 expected   = ist.strftime(”%d %b %Y”)
-sep        = “─” * 35
+sep        = “?” * 35
 return (
-f”⚠️ NAV Not Updated\n”
+f”?? NAV Not Updated\n”
 f”{sep}\n”
 f”Latest NAV : {last_date}\n”
 f”Expected   : {expected}\n”
@@ -674,23 +674,23 @@ f”Date       : {ist.strftime(’%d %b %Y  %H:%M IST’)}”
 
 def build_recovery_message(fund_name, current_dd, prev_dd, current_nav, nav_date) -> str:
 improvement = prev_dd - current_dd
-sep = “─” * 35
+sep = “?” * 35
 return (
-f”📈 Recovery Signal — {fund_name}\n”
+f”? Recovery Signal - {fund_name}\n”
 f”{sep}\n”
 f”Previous DD : {prev_dd:.1%} from peak\n”
 f”Current DD  : {current_dd:.1%} from peak\n”
-f”Improvement : ▲ {improvement:.1%} recovery\n”
-f”Current NAV : ₹{current_nav:.4f}\n”
+f”Improvement : ? {improvement:.1%} recovery\n”
+f”Current NAV : ?{current_nav:.4f}\n”
 f”{sep}\n”
-f”Momentum    : ↑ Turning positive\n”
+f”Momentum    : ? Turning positive\n”
 f”Note        : Review existing positions\n”
 f”{sep}\n”
 f”NAV Date    : {nav_date}\n”
 f”Alert Time  : {ist_now().strftime(’%d %b %Y  %H:%M IST’)}\n”
 )
 
-# ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
+# — NOTIFICATIONS —
 
 def send_email(subject: str, body: str) -> None:
 msg = MIMEMultipart()
@@ -718,7 +718,7 @@ return f”<i>{escape_md(text)}</i>”
 
 def send_telegram(text: str, bot_token: str = “”, chat_id: str = “”) -> None:
 if not bot_token or not chat_id:
-log.warning(”  Telegram skipped — bot_token or chat_id missing.”)
+log.warning(”  Telegram skipped - bot_token or chat_id missing.”)
 return
 url  = f”https://api.telegram.org/bot{bot_token}/sendMessage”
 resp = requests.post(
@@ -746,7 +746,7 @@ send_telegram(msg, bot_token, chat_id)
 except Exception as e:
 log.error(f”  Telegram failed: {e}”)
 
-# ─── NAV FRESHNESS CHECK ──────────────────────────────────────────────────────
+# — NAV FRESHNESS CHECK —
 
 def load_last_nav_date() -> str:
 if not os.path.exists(LAST_NAV_DATE_FILE):
@@ -762,7 +762,7 @@ def get_latest_nav_date() -> str:
 “”“Check latest NAV date using mfapi.in (reliable, no geo-restriction).
 Falls back to AMFI direct feed if mfapi fails.
 “””
-# Primary: mfapi.in — always accessible from GitHub Actions
+# Primary: mfapi.in - always accessible from GitHub Actions
 try:
 first_scheme = list(FUNDS.values())[0][“scheme_code”]
 url  = f”https://api.mfapi.in/mf/{first_scheme}”
@@ -774,7 +774,7 @@ date_str = data[0][“date”]  # format: DD-MM-YYYY
 log.info(f”  Latest NAV date (mfapi): {date_str}”)
 return date_str
 except Exception as e:
-log.warning(f”  mfapi date check failed: {e} — trying AMFI direct”)
+log.warning(f”  mfapi date check failed: {e} - trying AMFI direct”)
 
 ```
 # Fallback: AMFI direct feed
@@ -809,7 +809,7 @@ with open(NAV_PROCESSED_FILE, “r”, encoding=“utf-8”) as f:
 return f.read().strip() == today_str()
 
 def mark_nav_processed() -> None:
-“”“Mark today’s NAV as fully processed — stops further checks today.”””
+“”“Mark today’s NAV as fully processed - stops further checks today.”””
 with open(NAV_PROCESSED_FILE, “w”, encoding=“utf-8”) as f:
 f.write(today_str())
 
@@ -819,18 +819,18 @@ latest_date = get_latest_nav_date()
 last_date   = load_last_nav_date()
 
 ```
-log.info(f"  NAV date check — latest: {latest_date} | last seen: {last_date or 'none'}")
+log.info(f"  NAV date check - latest: {latest_date} | last seen: {last_date or 'none'}")
 
 if latest_date == last_date:
-    log.info("  No new NAV — skipping alert run.")
+    log.info("  No new NAV - skipping alert run.")
     return False
 
-log.info(f"  New NAV detected: {latest_date} — proceeding with signal check.")
+log.info(f"  New NAV detected: {latest_date} - proceeding with signal check.")
 save_last_nav_date(latest_date)
 return True
 ```
 
-# ─── MAIN ─────────────────────────────────────────────────────────────────────
+# — MAIN —
 
 def main() -> None:
 log.info(”=== Dip Alert System v2.0 started ===”)
@@ -839,13 +839,13 @@ run_date = today_str()
 ```
 log.info("Checking for new NAV...")
 if is_nav_already_processed():
-    log.info("NAV already processed today — skipping.")
+    log.info("NAV already processed today - skipping.")
     return
 
 if not is_nav_updated():
-    log.info("Run complete — no new NAV today yet.")
+    log.info("Run complete - no new NAV today yet.")
     if FINAL_CHECK:
-        log.info("  Final check — NAV still missing, sending alert.")
+        log.info("  Final check - NAV still missing, sending alert.")
         missed_msg = build_missed_nav_message()
         for fname, fcfg in FUNDS.items():
             notify("[NAV Missing] No update received", missed_msg, fcfg["bot_token"], fcfg["chat_id"])
@@ -869,7 +869,7 @@ current_drawdowns = {}
 current_signals   = {}
 summary           = []
 
-# ── Weekly summary check (Monday only) ──
+# --- Weekly summary check (Monday only) ---
 is_monday = ist_now().weekday() == 0
 
 for fund_name, fund_cfg in FUNDS.items():
@@ -905,11 +905,11 @@ for fund_name, fund_cfg in FUNDS.items():
     current_drawdowns[fund_name] = effective_dd
 
     if already_alerted_today(fund_name):
-        log.info(f"  Cooldown active — already alerted for {fund_name} today.")
+        log.info(f"  Cooldown active - already alerted for {fund_name} today.")
         current_signals[fund_name] = prev_signals.get(fund_name, "None")
         continue
 
-    # ── Recovery (Hold) detection ──
+    # --- Recovery (Hold) detection ---
     if check_recovery(fund_name, effective_dd, prev_drawdowns):
         msg = build_recovery_message(
             fund_name, effective_dd,
@@ -974,7 +974,7 @@ save_prev_drawdowns(current_drawdowns)
 save_prev_signals(current_signals)
 mark_nav_processed()
 
-# ── Weekly summary on Monday ──
+# --- Weekly summary on Monday ---
 if is_monday and summary:
     funds_data = [
         {
@@ -995,7 +995,7 @@ if is_monday and summary:
 log_df = pd.DataFrame(summary)
 header = not os.path.exists(SIGNAL_LOG_CSV)
 log_df.to_csv(SIGNAL_LOG_CSV, mode="a", index=False, header=header)
-log.info(f"\nRun complete — results appended to {SIGNAL_LOG_CSV}")
+log.info(f"\nRun complete - results appended to {SIGNAL_LOG_CSV}")
 ```
 
 if **name** == “**main**”:
