@@ -11,6 +11,19 @@ Bug fixes applied:
   6. drawdown() zero-guard added (ZeroDivisionError on bad data prevented)
   7. AMFI direct NAV fetch added (replaces stale mfapi as primary source)
   8. nav_processed gate added (prevents multiple runs per day)
+
+Production fixes (v2):
+  FIX-A. Telegram env vars corrected: reads TELEGRAM_BOT_TOKEN_MO/PP and
+          TELEGRAM_CHAT_ID_MO/PP to match GitHub Actions secrets — previously
+          read generic TELEGRAM_BOT_TOKEN which is never set → silent failure.
+  FIX-B. SIGNAL_LOG renamed signals.csv → signal_log.csv to match what the
+          workflow actually commits — previously signals.csv was never committed
+          and was lost on every fresh checkout.
+  FIX-C. PROCESSED_LOG renamed nav_processed.csv → nav_processed.txt to match
+          the file the workflow commits — previously the gate file was lost on
+          every fresh checkout, causing the daily-run gate to never work.
+  FIX-D. nav_processed.txt format changed from CSV to a plain date+fund store
+          consistent with the existing file format on disk.
 """
 
 import os
@@ -54,26 +67,30 @@ def create_session():
 SESSION = create_session()
 
 # -------------------- CONFIG ------------------------
+# FIX-A: per-fund Telegram tokens match GitHub Actions secrets
 FUNDS = {
     "Motilal Oswal Midcap Fund": {
         "scheme_code": "127042",
-        "amfi_code": "127042",      # AMFI code for direct NAV fetch
+        "amfi_code":   "127042",
+        "telegram_token":   os.environ.get("TELEGRAM_BOT_TOKEN_MO", ""),
+        "telegram_chat_id": os.environ.get("TELEGRAM_CHAT_ID_MO", ""),
     },
     "Parag Parikh Flexi Cap Fund": {
         "scheme_code": "122639",
-        "amfi_code": "122639",
+        "amfi_code":   "122639",
+        "telegram_token":   os.environ.get("TELEGRAM_BOT_TOKEN_PP", ""),
+        "telegram_chat_id": os.environ.get("TELEGRAM_CHAT_ID_PP", ""),
     },
 }
 
-NIFTY50    = "^NSEI"
-INDIA_VIX  = "^INDIAVIX"
+NIFTY50   = "^NSEI"
+INDIA_VIX = "^INDIAVIX"
 
-SIGNAL_LOG    = "signals.csv"
-PROCESSED_LOG = "nav_processed.csv"  # BUG8 FIX: gate file
+# FIX-B: filename matches what the workflow git-adds and commits
+SIGNAL_LOG    = "signal_log.csv"
 
-# Telegram config — set via environment variables
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
+# FIX-C: filename matches what the workflow git-adds and commits
+PROCESSED_LOG = "nav_processed.txt"
 
 # -------------------- HELPERS -----------------------
 
@@ -84,17 +101,15 @@ def today():
     return ist_now().strftime("%Y-%m-%d")
 
 # -------------------- BUG1 FIX: TELEGRAM -----------
-# Previously: no Telegram integration — alerts were never sent.
-# Fix: send_telegram() dispatches every actionable signal.
 
-def send_telegram(message: str) -> bool:
-    """Send a Telegram message. Returns True on success."""
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log.warning("Telegram not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID missing)")
+def send_telegram(message: str, token: str, chat_id: str) -> bool:
+    """Send a Telegram message for a specific fund. Returns True on success."""
+    if not token or not chat_id:
+        log.warning("Telegram not configured for this fund (token/chat_id missing)")
         return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": chat_id,
         "text": message,
         "parse_mode": "Markdown",
     }
@@ -115,8 +130,6 @@ def fetch_json(url):
     return resp.json()
 
 # -------------------- BUG7 FIX: AMFI DIRECT NAV ----
-# Previously: only mfapi.in was used, which can serve T+1 or stale dates.
-# Fix: try AMFI allnavs.txt first (always T+0 official NAV), fall back to mfapi.
 
 AMFI_NAV_URL = "https://www.amfiindia.com/spages/NAVAll.txt"
 
@@ -161,8 +174,6 @@ def fetch_yf(ticker):
     return df["Close"].squeeze()
 
 # -------------------- BUG5 FIX: VIX ABORT ----------
-# Previously: fallback=18 when VIX API failed, which can trigger false Buy signals.
-# Fix: raise an exception on VIX failure so the caller can abort the run cleanly.
 
 def fetch_vix() -> float:
     """
@@ -173,7 +184,6 @@ def fetch_vix() -> float:
         vix = float(fetch_yf(INDIA_VIX).iloc[-1])
         return vix
     except Exception as e:
-        # BUG5: removed silent fallback=18 that caused false Buy signals
         raise RuntimeError(f"VIX fetch failed, aborting to avoid false signals: {e}") from e
 
 # -------------------- VALIDATION --------------------
@@ -192,7 +202,6 @@ def rolling_peak(s, n):
     return float(s.iloc[-n:].max())
 
 # -------------------- BUG6 FIX: ZERO GUARD ----------
-# Previously: no check for peak==0, causing ZeroDivisionError on bad data.
 
 def drawdown(curr: float, peak: float) -> float:
     if peak == 0.0:
@@ -201,13 +210,11 @@ def drawdown(curr: float, peak: float) -> float:
     return (peak - curr) / peak
 
 # -------------------- BUG3 FIX: VIX FILTER ----------
-# Previously: Strong Buy / Buy had no VIX filter, causing false positives in calm markets.
-# Fix: each tier now requires a minimum VIX threshold.
 
 VIX_THRESHOLDS = {
-    "Aggressive Buy": 22,   # drawdown > 20% AND vix > 22
-    "Strong Buy":     18,   # drawdown > 15% AND vix > 18
-    "Buy":            15,   # drawdown > 10% AND vix > 15
+    "Aggressive Buy": 22,
+    "Strong Buy":     18,
+    "Buy":            15,
 }
 
 def generate_signal(dd: float, vix: float) -> str:
@@ -220,18 +227,12 @@ def generate_signal(dd: float, vix: float) -> str:
     return "None"
 
 # -------------------- BUG2 FIX: DATE IN HASH --------
-# Previously: hash = f"{fund}-{signal}-{nav}" with no date component.
-# Consequence: an identical signal on a new day was treated as a duplicate and skipped.
-# Fix: include today's date in the hash so each calendar day is independently evaluated.
 
 def signal_hash(fund: str, signal: str, nav: float) -> str:
     raw = f"{today()}-{fund}-{signal}-{round(nav, 2)}"
     return hashlib.md5(raw.encode()).hexdigest()
 
 # -------------------- BUG4 FIX: DEDUP ---------------
-# Previously: df.get("hash", []).values — pd.DataFrame has no .get(); this always
-# returned an empty list, so duplicates were never detected.
-# Fix: use df["hash"].values with an explicit column-existence check.
 
 def already_logged(hash_val: str) -> bool:
     if not os.path.exists(SIGNAL_LOG):
@@ -239,7 +240,7 @@ def already_logged(hash_val: str) -> bool:
     df = pd.read_csv(SIGNAL_LOG)
     if "hash" not in df.columns:
         return False
-    return hash_val in df["hash"].values   # BUG4 FIX
+    return hash_val in df["hash"].values
 
 def log_signal(row: dict):
     df = pd.DataFrame([row])
@@ -247,34 +248,32 @@ def log_signal(row: dict):
     df.to_csv(SIGNAL_LOG, mode="a", header=header, index=False)
 
 # -------------------- BUG8 FIX: DAILY GATE ----------
-# Previously: no gate — script could run multiple times per day and emit duplicate signals.
-# Fix: write a processed record after each successful fund run; skip if already present today.
+# FIX-C/D: nav_processed.txt stores "date|fund" lines — one per processed fund.
+# Matches the file the workflow commits, so the gate survives across checkouts.
 
 def mark_processed(fund: str):
-    row = {"date": today(), "fund": fund}
-    df = pd.DataFrame([row])
-    header = not os.path.exists(PROCESSED_LOG)
-    df.to_csv(PROCESSED_LOG, mode="a", header=header, index=False)
+    with open(PROCESSED_LOG, "a", encoding="utf-8") as f:
+        f.write(f"{today()}|{fund}\n")
 
 def already_processed_today(fund: str) -> bool:
     if not os.path.exists(PROCESSED_LOG):
         return False
-    df = pd.read_csv(PROCESSED_LOG)
-    if "date" not in df.columns or "fund" not in df.columns:
-        return False
-    return not df[(df["date"] == today()) & (df["fund"] == fund)].empty
+    with open(PROCESSED_LOG, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line == f"{today()}|{fund}":
+                return True
+    return False
 
 # -------------------- PROCESS -----------------------
 
 def process_fund(name: str, cfg: dict, vix: float, amfi_navs: dict):
     log.info(f"Processing {name}")
 
-    # BUG8: daily gate
     if already_processed_today(name):
         log.info(f"{name}: already processed today, skipping")
         return
 
-    # BUG7: prefer AMFI direct NAV for today's value; fall back to mfapi tail
     nav_history = fetch_nav_history(cfg["scheme_code"])
     validate_series(nav_history, name)
 
@@ -287,12 +286,12 @@ def process_fund(name: str, cfg: dict, vix: float, amfi_navs: dict):
         log.warning(f"{name}: AMFI NAV not found, falling back to mfapi NAV={curr:.4f}")
 
     peak = rolling_peak(nav_history, 120)
-    dd   = drawdown(curr, peak)          # BUG6 zero-guard applied inside
+    dd   = drawdown(curr, peak)
 
-    signal = generate_signal(dd, vix)    # BUG3 VIX filter applied inside
+    signal = generate_signal(dd, vix)
 
-    h = signal_hash(name, signal, curr)  # BUG2 date-aware hash
-    if already_logged(h):                # BUG4 fixed dedup
+    h = signal_hash(name, signal, curr)
+    if already_logged(h):
         log.info(f"{name}: duplicate signal hash, skipping")
         mark_processed(name)
         return
@@ -310,7 +309,7 @@ def process_fund(name: str, cfg: dict, vix: float, amfi_navs: dict):
         "hash":   h,
     })
 
-    # BUG1: send Telegram alert for any actionable signal
+    # FIX-A: pass per-fund token and chat_id
     if signal != "None":
         msg = (
             f"*Dip Alert* 🔔\n"
@@ -321,16 +320,15 @@ def process_fund(name: str, cfg: dict, vix: float, amfi_navs: dict):
             f"India VIX: {vix:.2f}\n"
             f"Date: {today()}"
         )
-        send_telegram(msg)
+        send_telegram(msg, cfg["telegram_token"], cfg["telegram_chat_id"])
 
-    mark_processed(name)  # BUG8: gate stamp after successful processing
+    mark_processed(name)
 
 # -------------------- MAIN --------------------------
 
 def main():
     log.info("=== Dip Alert Started ===")
 
-    # BUG5: abort on VIX failure instead of silently using fallback=18
     try:
         vix = fetch_vix()
         log.info(f"VIX={vix:.2f}")
@@ -339,7 +337,6 @@ def main():
         log.error("Aborting run to prevent false signals.")
         return
 
-    # BUG7: fetch AMFI navs once for all funds
     amfi_navs = fetch_amfi_navs()
 
     for name, cfg in FUNDS.items():
