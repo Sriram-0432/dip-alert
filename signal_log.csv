@@ -9,3 +9,19 @@ date,nav_date,fund,nav,peak_3m,dd_3m_pct,peak_6m,dd_6m_pct,vix,regime,nifty50_dd
 2026-03-18,18 Mar 2026,Parag Parikh Flexi Cap Fund,89.0865,95.3441,6.56,95.7732,6.98,18.72,Bear,9.69,False,None,None,0,Slow bleed,-0.71
 2026-03-20,20 Mar 2026,Motilal Oswal Midcap Fund,96.3556,115.5053,16.58,120.8065,20.24,22.81,Bear,12.21,False,None,None,0,Slow bleed,0.9
 2026-03-20,20 Mar 2026,Parag Parikh Flexi Cap Fund,87.7072,95.3441,8.01,95.7732,8.42,22.81,Bear,12.21,False,None,None,0,Slow bleed,-0.52
+2026-03-23,Motilal Oswal Midcap Fund,93.311,120.8065,0.2276,26.73,Aggressive Buy,d1250e1e16d88c84cff9d2fd7ef12272
+2026-03-24,Motilal Oswal Midcap Fund,95.6599,120.8065,0.2082,24.74,Aggressive Buy,e7560ce8c3de47250cabc3879a21073d
+2026-03-25,Motilal Oswal Midcap Fund,97.9963,120.8065,0.1888,24.64,Strong Buy,1519560f1e4cb0501bc11b602cabf574
+2026-03-27,Motilal Oswal Midcap Fund,95.5937,120.8065,0.2087,26.8,Aggressive Buy,1a916952eaffe908307622077e1c0a6d
+2026-03-30,Motilal Oswal Midcap Fund,92.9573,120.8065,0.2305,27.89,Aggressive Buy,ce76c2fb58512dec6a97478a95535b5e
+2026-03-31,Motilal Oswal Midcap Fund,92.9568,120.8065,0.2305,27.89,Aggressive Buy,a9161d03cf473adc744ffdd58996a568
+2026-04-01,Motilal Oswal Midcap Fund,95.6147,120.8065,0.2085,25.01,Aggressive Buy,49602cb582afdaff8beed9c9e64ad67f
+2026-04-02,Motilal Oswal Midcap Fund,95.9132,120.8065,0.2061,25.52,Aggressive Buy,68a432a9f314da9f10fc7a4ca155ca96
+2026-03-23,Parag Parikh Flexi Cap Fund,86.5918,95.7732,0.0959,26.73,None,1c731c9437696be4450e10f2622320e4
+2026-03-24,Parag Parikh Flexi Cap Fund,87.0006,95.7732,0.0916,24.74,None,d555c35f8568d98ace9fe525139d5aa4
+2026-03-25,Parag Parikh Flexi Cap Fund,87.841,95.7732,0.0828,24.64,None,178dd95b2ad4323ca436680aad37caa2
+2026-03-27,Parag Parikh Flexi Cap Fund,86.4452,95.7732,0.0974,26.8,None,ee31c60adba361c4009d69142b111b33
+2026-03-30,Parag Parikh Flexi Cap Fund,85.2599,95.7732,0.1098,27.89,Buy,ebfdd01257e46e02437b9a1fe6ef16af
+2026-03-31,Parag Parikh Flexi Cap Fund,85.6779,95.7732,0.1054,27.89,Buy,b3f408f329e7e69df0d7ef357693005c
+2026-04-01,Parag Parikh Flexi Cap Fund,86.3439,95.7732,0.0985,25.01,None,104d34c51feb3fa7569ac6f2e7a90bb5
+2026-04-02,Parag Parikh Flexi Cap Fund,86.5155,95.7732,0.0967,25.52,None,521264f46caff2a32581da7fdf2ccb2f
