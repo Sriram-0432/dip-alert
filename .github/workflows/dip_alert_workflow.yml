@@ -12,10 +12,14 @@ on:
 
   workflow_dispatch:
     inputs:
-      final_check:
-        description: 'Is this the final check of the day?'
+      run_backfill:
+        description: 'Run backfill.py instead of dip_alert.py?'
         required: false
         default: 'false'
+      backfill_start:
+        description: 'Backfill start date (YYYY-MM-DD, only used if run_backfill=true)'
+        required: false
+        default: ''
 
 # ── Grant write access to commit state files back to repo ──
 permissions:
@@ -26,30 +30,35 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
+      # FIX: actions/checkout@v6 does not exist — latest stable is v4
+      - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # FIX: actions/setup-python@v6 does not exist — latest stable is v5
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run dip alert
+      - name: Run backfill (manual trigger only)
+        if: ${{ github.event.inputs.run_backfill == 'true' }}
         env:
-          EMAIL_ENABLED:         ${{ secrets.EMAIL_ENABLED }}
-          EMAIL_SENDER:          ${{ secrets.EMAIL_SENDER }}
-          EMAIL_PASSWORD:        ${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_RECIPIENT:       ${{ secrets.EMAIL_RECIPIENT }}
-          TELEGRAM_ENABLED:      ${{ secrets.TELEGRAM_ENABLED }}
+          START_DATE: ${{ github.event.inputs.backfill_start }}
+        run: python backfill.py
+
+      - name: Run dip alert
+        if: ${{ github.event.inputs.run_backfill != 'true' }}
+        env:
+          # FIX: per-fund token names match what dip_alert.py reads via os.environ.get()
+          # FIX: removed EMAIL_*, TELEGRAM_ENABLED, FINAL_CHECK — not read by dip_alert.py
           TELEGRAM_BOT_TOKEN_MO: ${{ secrets.TELEGRAM_BOT_TOKEN_MO }}
           TELEGRAM_CHAT_ID_MO:   ${{ secrets.TELEGRAM_CHAT_ID_MO }}
           TELEGRAM_BOT_TOKEN_PP: ${{ secrets.TELEGRAM_BOT_TOKEN_PP }}
           TELEGRAM_CHAT_ID_PP:   ${{ secrets.TELEGRAM_CHAT_ID_PP }}
-          FINAL_CHECK: ${{ (github.event.schedule == '30 0 * * 2-6') && 'true' || github.event.inputs.final_check || 'false' }}
         run: python dip_alert.py
 
       - name: Commit state files
@@ -57,7 +66,11 @@ jobs:
         run: |
           git config user.email "action@github.com"
           git config user.name "GitHub Action"
-          touch last_nav_date.txt nav_processed.txt signal_log.csv prev_drawdown.csv alert_cooldown.csv prev_signal.csv
-          git add last_nav_date.txt nav_processed.txt signal_log.csv prev_drawdown.csv alert_cooldown.csv prev_signal.csv
+          # FIX: nav_processed.txt (not .csv) — matches what dip_alert.py writes
+          # FIX: signal_log.csv (not signals.csv) — matches SIGNAL_LOG constant
+          # REMOVED: last_nav_date.txt, prev_drawdown.csv, prev_signal.csv, alert_cooldown.csv
+          #          — orphaned from old version, not read by any current script
+          touch nav_processed.txt signal_log.csv
+          git add nav_processed.txt signal_log.csv
           git diff --cached --quiet || git commit -m "chore: update alert state [skip ci]"
           git push || true
