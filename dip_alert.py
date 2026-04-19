@@ -1,29 +1,13 @@
 # -*- coding: utf-8 -*-
-
 """
-Dip Alert System - Production Hardened
-Bug fixes applied:
-  1. Telegram alerts added (was completely silent)
-  2. Hash now includes date (same signal on new day was skipped)
-  3. VIX filter applied to Strong Buy / Buy signals (false positives fixed)
-  4. Dedup fixed: df["hash"].values instead of df.get("hash", []).values
-  5. VIX fallback=18 replaced with hard abort (False Buy on API fail prevented)
-  6. drawdown() zero-guard added (ZeroDivisionError on bad data prevented)
-  7. AMFI direct NAV fetch added (replaces stale mfapi as primary source)
-  8. nav_processed gate added (prevents multiple runs per day)
-
-Production fixes (v2):
-  FIX-A. Telegram env vars corrected: reads TELEGRAM_BOT_TOKEN_MO/PP and
-          TELEGRAM_CHAT_ID_MO/PP to match GitHub Actions secrets — previously
-          read generic TELEGRAM_BOT_TOKEN which is never set → silent failure.
-  FIX-B. SIGNAL_LOG renamed signals.csv → signal_log.csv to match what the
-          workflow actually commits — previously signals.csv was never committed
-          and was lost on every fresh checkout.
-  FIX-C. PROCESSED_LOG renamed nav_processed.csv → nav_processed.txt to match
-          the file the workflow commits — previously the gate file was lost on
-          every fresh checkout, causing the daily-run gate to never work.
-  FIX-D. nav_processed.txt format changed from CSV to a plain date+fund store
-          consistent with the existing file format on disk.
+Mutual Fund Dip Alert Pipeline v3.1
+=====================================
+Funds     : PPFCF Direct (122639) + UTI Nifty 50 Direct (120716)
+Alerts    : Single Telegram channel for all funds + dev errors
+Scheduler : GitHub Actions (cron: 02:30 UTC = 08:00 IST, weekdays only)
+Signals   : 52-week MDD tiers — L1 ≥5%, L2 ≥8%, L3 ≥12%
+State     : SQLite (watermarks.db) committed to repo each run
+Retries   : tenacity exponential backoff on all HTTP calls
 """
 
 import os
@@ -31,323 +15,510 @@ import sys
 import io
 import logging
 import hashlib
+import sqlite3
 from datetime import datetime, timezone, timedelta
+from json import JSONDecodeError
 
 import requests
 import pandas as pd
 import yfinance as yf
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log,
+    RetryError,
+)
+from requests.exceptions import RequestException
 
-# -------------------- STDOUT FIX --------------------
+# ── UTF-8 STDOUT FIX ──────────────────────────────────────────────────────────
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
-# -------------------- LOGGING -----------------------
+# ── LOGGING ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[logging.StreamHandler()],
 )
 log = logging.getLogger(__name__)
 
-# -------------------- RETRY SESSION -----------------
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+# ── SINGLE TELEGRAM CHANNEL ───────────────────────────────────────────────────
+# One bot, one chat — all fund alerts AND dev/failure messages go here.
+# GitHub Secrets needed:
+#   TELEGRAM_BOT_TOKEN   →  from @BotFather
+#   TELEGRAM_CHAT_ID     →  your personal chat ID (from @userinfobot)
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-def create_session():
-    retry = Retry(
-        total=5,
-        backoff_factor=1.5,
-        status_forcelist=[429, 500, 502, 503, 504]
-    )
-    s = requests.Session()
-    adapter = HTTPAdapter(max_retries=retry)
-    s.mount("https://", adapter)
-    s.mount("http://", adapter)
-    return s
-
-SESSION = create_session()
-
-# -------------------- CONFIG ------------------------
-# FIX-A: per-fund Telegram tokens match GitHub Actions secrets
+# ── FUND CONFIG ───────────────────────────────────────────────────────────────
+# Scheme codes verified against AMFI:
+#   122639 = Parag Parikh Flexi Cap Fund — Direct Plan — Growth
+#   120716 = UTI Nifty 50 Index Fund — Direct Plan — Growth
 FUNDS = {
-    "Motilal Oswal Midcap Fund": {
-        "scheme_code": "127042",
-        "amfi_code":   "127042",
-        "telegram_token":   os.environ.get("TELEGRAM_BOT_TOKEN_MO", ""),
-        "telegram_chat_id": os.environ.get("TELEGRAM_CHAT_ID_MO", ""),
+    "122639": {
+        "name":      "PPFAS Flexi Cap Direct",
+        "emoji":     "🟦",
+        "threshold": 5.0,   # MDD % to trigger minimum L1 alert
     },
-    "Parag Parikh Flexi Cap Fund": {
-        "scheme_code": "122639",
-        "amfi_code":   "122639",
-        "telegram_token":   os.environ.get("TELEGRAM_BOT_TOKEN_PP", ""),
-        "telegram_chat_id": os.environ.get("TELEGRAM_CHAT_ID_PP", ""),
+    "120716": {
+        "name":      "UTI Nifty 50 Index Direct",
+        "emoji":     "🟧",
+        "threshold": 3.5,   # Index fund — lower volatility, lower bar
     },
 }
 
-NIFTY50   = "^NSEI"
-INDIA_VIX = "^INDIAVIX"
+# ── MDD ALERT TIERS ───────────────────────────────────────────────────────────
+# Evaluated most-severe-first; first match wins.
+# (mdd_threshold, tier_level, display_label)
+ALERT_TIERS = [
+    (0.12, 3, "🚨 *LEVEL 3 — CRITICAL DIP*"),
+    (0.08, 2, "🔴 *LEVEL 2 — SIGNIFICANT DIP*"),
+    (0.05, 1, "⚠️  *LEVEL 1 — DIP ALERT*"),
+]
 
-# FIX-B: filename matches what the workflow git-adds and commits
+# ── EXTERNAL DATA SOURCES ─────────────────────────────────────────────────────
+INDIA_VIX    = "^INDIAVIX"
+AMFI_NAV_URL = "https://www.amfiindia.com/spages/NAVAll.txt"
+
+# ── CONSTANTS ─────────────────────────────────────────────────────────────────
+LOOKBACK_DAYS  = 252   # ~52 trading weeks = 1 full year of NAV data
+VIX_HIGH       = 18.0  # above = "high volatility" flag in alert message
+COOLDOWN_HOURS = 24    # suppress same-tier re-alert within this window
+
+# ── STATE FILES (all git-committed by workflow after each run) ────────────────
+WATERMARK_DB  = "watermarks.db"
 SIGNAL_LOG    = "signal_log.csv"
-
-# FIX-C: filename matches what the workflow git-adds and commits
 PROCESSED_LOG = "nav_processed.txt"
 
-# -------------------- HELPERS -----------------------
 
-def ist_now():
+# ─────────────────────────────────────────────────────────────────────────────
+# IST HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ist_now() -> datetime:
     return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
 
-def today():
+def today_str() -> str:
     return ist_now().strftime("%Y-%m-%d")
 
-# -------------------- BUG1 FIX: TELEGRAM -----------
 
-def send_telegram(message: str, token: str, chat_id: str) -> bool:
-    """Send a Telegram message for a specific fund. Returns True on success."""
-    if not token or not chat_id:
-        log.warning("Telegram not configured for this fund (token/chat_id missing)")
-        return False
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "Markdown",
-    }
-    try:
-        resp = SESSION.post(url, json=payload, timeout=10)
-        resp.raise_for_status()
-        log.info("Telegram alert sent")
-        return True
-    except Exception as e:
-        log.error(f"Telegram send failed: {e}")
-        return False
+# ─────────────────────────────────────────────────────────────────────────────
+# HTTP — TENACITY RETRY WRAPPERS
+# ─────────────────────────────────────────────────────────────────────────────
 
-# -------------------- DATA --------------------------
-
-def fetch_json(url):
-    resp = SESSION.get(url, timeout=30)
+@retry(
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1.5, min=2, max=60),
+    retry=retry_if_exception_type((RequestException, JSONDecodeError)),
+    before_sleep=before_sleep_log(log, logging.WARNING),
+    reraise=True,
+)
+def _get_json(url: str, timeout: int = 30) -> dict:
+    """GET → JSON with exponential backoff. Retries on network errors + bad JSON."""
+    resp = requests.get(url, timeout=timeout)
     resp.raise_for_status()
-    return resp.json()
+    try:
+        return resp.json()
+    except JSONDecodeError as exc:
+        log.error(f"JSONDecodeError at {url}: {exc}")
+        raise
 
-# -------------------- BUG7 FIX: AMFI DIRECT NAV ----
 
-AMFI_NAV_URL = "https://www.amfiindia.com/spages/NAVAll.txt"
+@retry(
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1.5, min=2, max=60),
+    retry=retry_if_exception_type(RequestException),
+    before_sleep=before_sleep_log(log, logging.WARNING),
+    reraise=True,
+)
+def _get_text(url: str, timeout: int = 30) -> str:
+    resp = requests.get(url, timeout=timeout)
+    resp.raise_for_status()
+    return resp.text
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TELEGRAM — SINGLE CHANNEL
+# ─────────────────────────────────────────────────────────────────────────────
+
+def send_alert(message: str, is_dev: bool = False) -> bool:
+    """
+    Send any message to the single configured Telegram channel.
+    is_dev=True prepends a wrench header so pipeline errors are visually distinct
+    from fund alerts even though they share the same chat.
+    """
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        log.warning("Telegram not configured — set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID")
+        return False
+    text = f"🛠 *DEV — Pipeline Error*\n{message}" if is_dev else message
+    url  = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        resp = requests.post(
+            url,
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        log.info("Telegram message sent")
+        return True
+    except Exception as exc:
+        log.error(f"Telegram send failed: {exc}")
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SQLITE — WATERMARK + COOLDOWN STORE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def init_db():
+    """Create tables if absent. Idempotent — safe to call on every run."""
+    con = sqlite3.connect(WATERMARK_DB)
+    con.executescript("""
+        CREATE TABLE IF NOT EXISTS watermarks (
+            scheme_code TEXT PRIMARY KEY,
+            peak_nav    REAL NOT NULL,
+            peak_date   TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS alert_cooldown (
+            scheme_code  TEXT    NOT NULL,
+            tier         INTEGER NOT NULL,
+            last_alerted TEXT    NOT NULL,
+            PRIMARY KEY (scheme_code, tier)
+        );
+    """)
+    con.commit()
+    con.close()
+    log.info("SQLite DB initialised (watermarks.db)")
+
+
+def get_stored_peak(scheme_code: str) -> tuple:
+    con = sqlite3.connect(WATERMARK_DB)
+    row = con.execute(
+        "SELECT peak_nav, peak_date FROM watermarks WHERE scheme_code = ?",
+        (scheme_code,),
+    ).fetchone()
+    con.close()
+    return (row[0], row[1]) if row else (None, None)
+
+
+def upsert_peak(scheme_code: str, nav: float, nav_date: str):
+    """Ratchets upward only — never overwrites a historical high with a lower value."""
+    con = sqlite3.connect(WATERMARK_DB)
+    con.execute("""
+        INSERT INTO watermarks (scheme_code, peak_nav, peak_date, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(scheme_code) DO UPDATE SET
+            peak_nav   = excluded.peak_nav,
+            peak_date  = excluded.peak_date,
+            updated_at = excluded.updated_at
+        WHERE excluded.peak_nav > watermarks.peak_nav
+    """, (scheme_code, nav, nav_date, today_str()))
+    con.commit()
+    con.close()
+
+
+def is_on_cooldown(scheme_code: str, tier: int) -> bool:
+    con = sqlite3.connect(WATERMARK_DB)
+    row = con.execute(
+        "SELECT last_alerted FROM alert_cooldown WHERE scheme_code = ? AND tier = ?",
+        (scheme_code, tier),
+    ).fetchone()
+    con.close()
+    if not row:
+        return False
+    last = datetime.fromisoformat(row[0])
+    return (ist_now().replace(tzinfo=None) - last) < timedelta(hours=COOLDOWN_HOURS)
+
+
+def set_cooldown(scheme_code: str, tier: int):
+    con = sqlite3.connect(WATERMARK_DB)
+    con.execute("""
+        INSERT INTO alert_cooldown (scheme_code, tier, last_alerted)
+        VALUES (?, ?, ?)
+        ON CONFLICT(scheme_code, tier) DO UPDATE SET last_alerted = excluded.last_alerted
+    """, (scheme_code, tier, ist_now().replace(tzinfo=None).isoformat()))
+    con.commit()
+    con.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DATA FETCHING
+# ─────────────────────────────────────────────────────────────────────────────
 
 def fetch_amfi_navs() -> dict:
     """
-    Download AMFI's allnavs.txt and return {scheme_code: nav} mapping.
-    Returns empty dict on failure so caller can fall back to mfapi.
+    Download AMFI's daily NAVAll.txt → {scheme_code: float}.
+    Most up-to-date source; updated by ~8 PM IST each trading day.
+    Returns {} on failure so callers fall back to mfapi history.
     """
     try:
-        resp = SESSION.get(AMFI_NAV_URL, timeout=30)
-        resp.raise_for_status()
-        navs = {}
-        for line in resp.text.splitlines():
+        text = _get_text(AMFI_NAV_URL)
+        navs: dict[str, float] = {}
+        for line in text.splitlines():
             parts = line.split(";")
             if len(parts) >= 5:
                 code = parts[0].strip()
                 try:
-                    nav = float(parts[4].strip())
-                    navs[code] = nav
-                except ValueError:
+                    navs[code] = float(parts[4].strip())
+                except (ValueError, TypeError):
                     pass
         log.info(f"AMFI NAV file loaded: {len(navs)} schemes")
         return navs
-    except Exception as e:
-        log.warning(f"AMFI NAV fetch failed: {e}")
+    except Exception as exc:
+        log.warning(f"AMFI NAV fetch failed: {exc}")
+        send_alert(f"AMFI NAV fetch failed — falling back to mfapi.\n`{exc}`", is_dev=True)
         return {}
 
+
 def fetch_nav_history(scheme_code: str) -> pd.Series:
-    """Historical NAV series from mfapi (used for peak/drawdown calculation)."""
+    """
+    Historical NAV series from mfapi.in.
+    Returns date-indexed pd.Series of float NAVs, sorted ascending.
+    Explicit guards for JSONDecodeError (API), KeyError (schema change),
+    ValueError/TypeError (bad 'nav' string like '-' or '').
+    """
     url = f"https://api.mfapi.in/mf/{scheme_code}"
-    data = fetch_json(url)["data"]
-    series = pd.Series({
-        datetime.strptime(d["date"], "%d-%m-%Y").date(): float(d["nav"])
-        for d in data
-    }).sort_index()
+    try:
+        payload = _get_json(url)
+    except RetryError as exc:
+        raise RuntimeError(f"mfapi exhausted all retries for {scheme_code}: {exc}") from exc
+
+    try:
+        records = payload["data"]
+    except KeyError as exc:
+        raise RuntimeError(
+            f"mfapi 'data' key missing for {scheme_code}. "
+            f"Keys present: {list(payload.keys())}"
+        ) from exc
+
+    parsed: dict = {}
+    skipped = 0
+    for entry in records:
+        try:
+            d   = datetime.strptime(entry["date"], "%d-%m-%Y").date()
+            nav = float(entry["nav"])   # strict cast — raises on "-", "", None
+            parsed[d] = nav
+        except (KeyError, ValueError, TypeError):
+            skipped += 1
+            continue
+
+    if skipped:
+        log.warning(f"{scheme_code}: skipped {skipped} malformed NAV rows")
+    if not parsed:
+        raise RuntimeError(f"No valid NAV rows could be parsed for {scheme_code}")
+
+    series = pd.Series(parsed).sort_index()
+    log.info(
+        f"NAV history: {scheme_code} | {len(series)} rows | "
+        f"{series.index[0]} → {series.index[-1]}"
+    )
     return series
 
-def fetch_yf(ticker):
-    df = yf.download(ticker, period="1y", progress=False)
-    if df.empty:
-        raise ValueError(f"No data for {ticker}")
-    return df["Close"].squeeze()
-
-# -------------------- BUG5 FIX: VIX ABORT ----------
 
 def fetch_vix() -> float:
     """
-    Fetch India VIX. Raises RuntimeError on failure — callers must handle this
-    and abort rather than proceeding with an assumed VIX value.
+    India VIX from yfinance. Hard-raises RuntimeError on failure.
+    Callers must catch this and abort — we never assume a default VIX value.
     """
     try:
-        vix = float(fetch_yf(INDIA_VIX).iloc[-1])
-        return vix
-    except Exception as e:
-        raise RuntimeError(f"VIX fetch failed, aborting to avoid false signals: {e}") from e
+        df = yf.download(INDIA_VIX, period="5d", progress=False)
+        if df.empty:
+            raise ValueError("yfinance returned empty dataframe for VIX")
+        return float(df["Close"].squeeze().iloc[-1])
+    except Exception as exc:
+        raise RuntimeError(f"India VIX fetch failed: {exc}") from exc
 
-# -------------------- VALIDATION --------------------
 
-def validate_series(s, name):
-    if s.empty:
-        raise ValueError(f"{name}: empty")
-    if s.isna().any():
-        raise ValueError(f"{name}: NaN present")
-    if len(s) < 30:
-        raise ValueError(f"{name}: insufficient data ({len(s)} rows)")
+# ─────────────────────────────────────────────────────────────────────────────
+# SIGNAL MATH
+# ─────────────────────────────────────────────────────────────────────────────
 
-# -------------------- LOGIC -------------------------
+def refresh_watermark(scheme_code: str, history: pd.Series) -> tuple:
+    """
+    1. Find the peak in the most recent LOOKBACK_DAYS of live history.
+    2. Upsert into SQLite (only if higher than stored value).
+    3. Read back from DB — may return a higher value from a prior run.
+    This ensures the 52-week high is never lost to a short API window.
+    """
+    window    = history.iloc[-LOOKBACK_DAYS:]
+    peak_idx  = str(window.idxmax())
+    peak_nav  = float(window.max())
+    upsert_peak(scheme_code, peak_nav, peak_idx)
+    return get_stored_peak(scheme_code)   # authoritative value from DB
 
-def rolling_peak(s, n):
-    return float(s.iloc[-n:].max())
 
-# -------------------- BUG6 FIX: ZERO GUARD ----------
-
-def drawdown(curr: float, peak: float) -> float:
-    if peak == 0.0:
-        log.warning("Peak NAV is zero — cannot compute drawdown, returning 0.0")
+def compute_mdd(current: float, peak: float) -> float:
+    if peak <= 0.0:
+        log.warning("Peak NAV ≤ 0 — returning 0.0 (ZeroDivisionError guard)")
         return 0.0
-    return (peak - curr) / peak
+    return (peak - current) / peak
 
-# -------------------- BUG3 FIX: VIX FILTER ----------
 
-VIX_THRESHOLDS = {
-    "Aggressive Buy": 22,
-    "Strong Buy":     18,
-    "Buy":            15,
-}
+def classify_tier(mdd: float) -> tuple:
+    """Returns (tier_int, label_str) for the most severe threshold breached."""
+    for threshold, level, label in ALERT_TIERS:
+        if mdd >= threshold:
+            return level, label
+    return None, None
 
-def generate_signal(dd: float, vix: float) -> str:
-    if dd > 0.20 and vix > VIX_THRESHOLDS["Aggressive Buy"]:
-        return "Aggressive Buy"
-    if dd > 0.15 and vix > VIX_THRESHOLDS["Strong Buy"]:
-        return "Strong Buy"
-    if dd > 0.10 and vix > VIX_THRESHOLDS["Buy"]:
-        return "Buy"
-    return "None"
 
-# -------------------- BUG2 FIX: DATE IN HASH --------
+# ─────────────────────────────────────────────────────────────────────────────
+# DEDUP + DAILY GATE
+# ─────────────────────────────────────────────────────────────────────────────
 
-def signal_hash(fund: str, signal: str, nav: float) -> str:
-    raw = f"{today()}-{fund}-{signal}-{round(nav, 2)}"
+def signal_hash(fund: str, tier, nav: float) -> str:
+    raw = f"{today_str()}-{fund}-{tier}-{round(nav, 2)}"
     return hashlib.md5(raw.encode()).hexdigest()
 
-# -------------------- BUG4 FIX: DEDUP ---------------
 
-def already_logged(hash_val: str) -> bool:
+def already_logged(h: str) -> bool:
     if not os.path.exists(SIGNAL_LOG):
         return False
-    df = pd.read_csv(SIGNAL_LOG)
-    if "hash" not in df.columns:
+    try:
+        df = pd.read_csv(SIGNAL_LOG)
+        return "hash" in df.columns and h in df["hash"].values
+    except Exception:
         return False
-    return hash_val in df["hash"].values
+
 
 def log_signal(row: dict):
-    df = pd.DataFrame([row])
-    header = not os.path.exists(SIGNAL_LOG)
-    df.to_csv(SIGNAL_LOG, mode="a", header=header, index=False)
+    pd.DataFrame([row]).to_csv(
+        SIGNAL_LOG, mode="a",
+        header=not os.path.exists(SIGNAL_LOG),
+        index=False,
+    )
 
-# -------------------- BUG8 FIX: DAILY GATE ----------
-# FIX-C/D: nav_processed.txt stores "date|fund" lines — one per processed fund.
-# Matches the file the workflow commits, so the gate survives across checkouts.
 
 def mark_processed(fund: str):
     with open(PROCESSED_LOG, "a", encoding="utf-8") as f:
-        f.write(f"{today()}|{fund}\n")
+        f.write(f"{today_str()}|{fund}\n")
+
 
 def already_processed_today(fund: str) -> bool:
     if not os.path.exists(PROCESSED_LOG):
         return False
-    with open(PROCESSED_LOG, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line == f"{today()}|{fund}":
-                return True
-    return False
+    target = f"{today_str()}|{fund}"
+    with open(PROCESSED_LOG, encoding="utf-8") as f:
+        return any(line.strip() == target for line in f)
 
-# -------------------- PROCESS -----------------------
 
-def process_fund(name: str, cfg: dict, vix: float, amfi_navs: dict):
-    log.info(f"Processing {name}")
+# ─────────────────────────────────────────────────────────────────────────────
+# CORE FUND PROCESSING
+# ─────────────────────────────────────────────────────────────────────────────
+
+def process_fund(code: str, cfg: dict, vix: float, amfi_navs: dict):
+    name  = cfg["name"]
+    emoji = cfg["emoji"]
+    log.info(f"{'─'*52}")
+    log.info(f"Processing: {emoji} {name}  [{code}]")
 
     if already_processed_today(name):
-        log.info(f"{name}: already processed today, skipping")
+        log.info("  Already processed today — skipping")
         return
 
-    nav_history = fetch_nav_history(cfg["scheme_code"])
-    validate_series(nav_history, name)
+    history = fetch_nav_history(code)
 
-    amfi_code = cfg.get("amfi_code", cfg["scheme_code"])
-    if amfi_code in amfi_navs:
-        curr = amfi_navs[amfi_code]
-        log.info(f"{name}: using AMFI direct NAV={curr:.4f}")
+    # Current NAV: AMFI direct (today's official) → mfapi latest (fallback)
+    if code in amfi_navs:
+        curr_nav = amfi_navs[code]
+        log.info(f"  Current NAV (AMFI direct):    ₹{curr_nav:.4f}")
     else:
-        curr = float(nav_history.iloc[-1])
-        log.warning(f"{name}: AMFI NAV not found, falling back to mfapi NAV={curr:.4f}")
+        curr_nav = float(history.iloc[-1])
+        log.warning(f"  Current NAV (mfapi fallback): ₹{curr_nav:.4f}")
 
-    peak = rolling_peak(nav_history, 120)
-    dd   = drawdown(curr, peak)
+    peak_nav, peak_date = refresh_watermark(code, history)
+    log.info(f"  52-Week High (watermark DB):  ₹{peak_nav:.4f} on {peak_date}")
 
-    signal = generate_signal(dd, vix)
+    mdd         = compute_mdd(curr_nav, peak_nav)
+    tier, label = classify_tier(mdd)
+    vix_high    = vix >= VIX_HIGH
+    log.info(
+        f"  MDD: {mdd:.2%}  |  Tier: {tier or 'None'}  |  "
+        f"VIX: {vix:.2f} {'⬆ HIGH' if vix_high else ''}"
+    )
 
-    h = signal_hash(name, signal, curr)
-    if already_logged(h):
-        log.info(f"{name}: duplicate signal hash, skipping")
-        mark_processed(name)
-        return
+    # Audit log — written every run for every fund
+    h = signal_hash(name, tier, curr_nav)
+    if not already_logged(h):
+        log_signal({
+            "date":      today_str(),
+            "fund":      name,
+            "scheme":    code,
+            "nav":       round(curr_nav, 4),
+            "peak_nav":  round(peak_nav, 4),
+            "peak_date": peak_date,
+            "mdd_pct":   round(mdd * 100, 2),
+            "tier":      tier,
+            "vix":       round(vix, 2),
+            "vix_high":  vix_high,
+            "hash":      h,
+        })
 
-    log.info(f"{name} | NAV={curr:.4f} | Peak={peak:.4f} | DD={dd:.2%} | VIX={vix:.2f} | Signal={signal}")
-
-    log_signal({
-        "date":   today(),
-        "fund":   name,
-        "nav":    curr,
-        "peak":   round(peak, 4),
-        "dd":     round(dd, 4),
-        "vix":    round(vix, 2),
-        "signal": signal,
-        "hash":   h,
-    })
-
-    # FIX-A: pass per-fund token and chat_id
-    if signal != "None":
-        msg = (
-            f"*Dip Alert* 🔔\n"
-            f"Fund: {name}\n"
-            f"Signal: *{signal}*\n"
-            f"NAV: ₹{curr:.4f} (Peak: ₹{peak:.4f})\n"
-            f"Drawdown: {dd:.2%}\n"
-            f"India VIX: {vix:.2f}\n"
-            f"Date: {today()}"
-        )
-        send_telegram(msg, cfg["telegram_token"], cfg["telegram_chat_id"])
+    if tier is not None:
+        if is_on_cooldown(code, tier):
+            log.info(f"  Tier {tier} on {COOLDOWN_HOURS}h cooldown — suppressing alert")
+        else:
+            vix_line = (
+                f"India VIX: `{vix:.2f}` 📈 *High Volatility — Stronger Entry Signal*"
+                if vix_high else
+                f"India VIX: `{vix:.2f}`"
+            )
+            msg = (
+                f"{label}\n\n"
+                f"Fund: *{emoji} {name}*\n"
+                f"Current NAV:  ₹`{curr_nav:.4f}`\n"
+                f"52-Week High: ₹`{peak_nav:.4f}` _(on {peak_date})_\n"
+                f"Drawdown:     *{mdd:.2%}*\n"
+                f"{vix_line}\n"
+                f"Date: `{today_str()}`"
+            )
+            if send_alert(msg):
+                set_cooldown(code, tier)
+    else:
+        log.info(f"  No actionable dip  (MDD {mdd:.2%} < 5% L1 floor)")
 
     mark_processed(name)
 
-# -------------------- MAIN --------------------------
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    log.info("=== Dip Alert Started ===")
+    log.info("═" * 52)
+    log.info("  Dip Alert Pipeline v3.1 — Started")
+    log.info("═" * 52)
 
+    init_db()
+
+    # VIX hard abort — never proceed with an assumed/default VIX
     try:
         vix = fetch_vix()
-        log.info(f"VIX={vix:.2f}")
-    except RuntimeError as e:
-        log.error(str(e))
-        log.error("Aborting run to prevent false signals.")
-        return
+        log.info(f"India VIX: {vix:.2f}")
+    except RuntimeError as exc:
+        log.error(str(exc))
+        send_alert(f"*Pipeline aborted* — VIX fetch failed.\n`{exc}`", is_dev=True)
+        sys.exit(1)
 
     amfi_navs = fetch_amfi_navs()
 
-    for name, cfg in FUNDS.items():
+    for code, cfg in FUNDS.items():
         try:
-            process_fund(name, cfg, vix, amfi_navs)
-        except Exception as e:
-            log.exception(f"Fund failed: {name} | {e}")
+            process_fund(code, cfg, vix, amfi_navs)
+        except Exception as exc:
+            log.exception(f"Fund failed: {cfg['name']} | {exc}")
+            send_alert(
+                f"*Fund processing failed*\nFund: {cfg['name']} `[{code}]`\n`{exc}`",
+                is_dev=True,
+            )
 
-    log.info("=== Completed ===")
+    log.info("═" * 52)
+    log.info("  Dip Alert Pipeline v3.1 — Completed")
+    log.info("═" * 52)
 
-# -------------------- ENTRY -------------------------
 
 if __name__ == "__main__":
     main()

@@ -1,76 +1,37 @@
-name: Mutual Fund Dip Alert
+name: Dip Alert Pipeline v3.1
 
 on:
   schedule:
-    # Every 1 hour from 6:00 PM to 11:00 PM IST (Mon–Fri)
-    # 6:00 PM IST = 12:30 UTC
-    - cron: "30 12-17 * * 1-5"   # 6:00, 7:00, 8:00, 9:00, 10:00, 11:00 PM IST
-
-    # Every 1 hour from 12:00 AM to 6:00 AM IST (overnight)
-    - cron: "30 18-23 * * 1-5"   # 12:00, 1:00, 2:00, 3:00, 4:00, 5:00 AM IST
-    - cron: "30 0 * * 2-6"       # 6:00 AM IST final check
-
-  workflow_dispatch:
-    inputs:
-      run_backfill:
-        description: 'Run backfill.py instead of dip_alert.py?'
-        required: false
-        default: 'false'
-      backfill_start:
-        description: 'Backfill start date (YYYY-MM-DD, only used if run_backfill=true)'
-        required: false
-        default: ''
-
-# ── Grant write access to commit state files back to repo ──
-permissions:
-  contents: write
+    # 02:30 UTC = 08:00 IST — AMFI has finished publishing previous day NAVs
+    - cron: "30 2 * * 1-5"   # Monday–Friday only; no NAVs on weekends
+  workflow_dispatch:           # Allow manual trigger from Actions tab
 
 jobs:
   run-alert:
     runs-on: ubuntu-latest
 
     steps:
-      # FIX: actions/checkout@v6 does not exist — latest stable is v4
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Checkout repo (includes persisted state files)
+        uses: actions/checkout@v4
 
-      # FIX: actions/setup-python@v6 does not exist — latest stable is v5
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11"
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run backfill (manual trigger only)
-        if: ${{ github.event.inputs.run_backfill == 'true' }}
+      - name: Run Dip Alert Pipeline
         env:
-          START_DATE: ${{ github.event.inputs.backfill_start }}
-        run: python backfill.py
-
-      - name: Run dip alert
-        if: ${{ github.event.inputs.run_backfill != 'true' }}
-        env:
-          # FIX: per-fund token names match what dip_alert.py reads via os.environ.get()
-          # FIX: removed EMAIL_*, TELEGRAM_ENABLED, FINAL_CHECK — not read by dip_alert.py
-          TELEGRAM_BOT_TOKEN_MO: ${{ secrets.TELEGRAM_BOT_TOKEN_MO }}
-          TELEGRAM_CHAT_ID_MO:   ${{ secrets.TELEGRAM_CHAT_ID_MO }}
-          TELEGRAM_BOT_TOKEN_PP: ${{ secrets.TELEGRAM_BOT_TOKEN_PP }}
-          TELEGRAM_CHAT_ID_PP:   ${{ secrets.TELEGRAM_CHAT_ID_PP }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python dip_alert.py
 
-      - name: Commit state files
-        if: always()
+      - name: Commit updated state files back to repo
         run: |
-          git config user.email "action@github.com"
-          git config user.name "GitHub Action"
-          # FIX: nav_processed.txt (not .csv) — matches what dip_alert.py writes
-          # FIX: signal_log.csv (not signals.csv) — matches SIGNAL_LOG constant
-          # REMOVED: last_nav_date.txt, prev_drawdown.csv, prev_signal.csv, alert_cooldown.csv
-          #          — orphaned from old version, not read by any current script
-          touch nav_processed.txt signal_log.csv
-          git add nav_processed.txt signal_log.csv
-          git diff --cached --quiet || git commit -m "chore: update alert state [skip ci]"
-          git push || true
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add signal_log.csv nav_processed.txt watermarks.db
+          git diff --cached --quiet || git commit -m "chore: state update $(date -u '+%Y-%m-%d')"
+          git push
