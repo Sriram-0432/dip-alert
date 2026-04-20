@@ -2,7 +2,7 @@
 """
 Mutual Fund Dip Alert Pipeline v3.1
 =====================================
-Funds     : PPFCF Direct (122639) + UTI Nifty 50 Direct (120716)
+Funds     : PPFCF Direct (122639) + UTI Nifty 50 Direct (120716) + MO Midcap Direct (127042)
 Alerts    : Single Telegram channel for all funds + dev errors
 Scheduler : GitHub Actions (cron: 02:30 UTC = 08:00 IST, weekdays only)
 Signals   : 52-week MDD tiers — L1 ≥5%, L2 ≥8%, L3 ≥12%
@@ -60,22 +60,36 @@ FUNDS = {
     "122639": {
         "name":      "PPFAS Flexi Cap Direct",
         "emoji":     "🟦",
-        "threshold": 5.0,   # MDD % to trigger minimum L1 alert
+        "threshold": 5.0,   # MDD % to trigger minimum alert
     },
     "120716": {
         "name":      "UTI Nifty 50 Index Direct",
         "emoji":     "🟧",
         "threshold": 3.5,   # Index fund — lower volatility, lower bar
     },
+    "127042": {
+        "name":      "Motilal Oswal Midcap Direct",
+        "emoji":     "🟩",
+        "threshold": 5.0,   # Midcap fund — standard 5% trigger
+    },
 }
 
-# ── MDD ALERT TIERS ───────────────────────────────────────────────────────────
+# ── SIGNAL TIERS ──────────────────────────────────────────────────────────────
+# MDD thresholds mapped to actionable investment signals.
 # Evaluated most-severe-first; first match wins.
-# (mdd_threshold, tier_level, display_label)
+#
+#   MDD ≥ 20%  →  AGGRESSIVE BUY  — deep crash, deploy maximum capital
+#   MDD ≥ 12%  →  STRONG BUY      — significant correction, strong entry
+#   MDD ≥  8%  →  BUY             — healthy dip, start building position
+#   MDD ≥  5%  →  ACCUMULATE      — mild pullback, add small tranches
+#   MDD <  5%  →  WAIT            — no actionable dip yet (no alert sent)
+#
+# (mdd_threshold, tier_level, signal_label, action_line)
 ALERT_TIERS = [
-    (0.12, 3, "🚨 *LEVEL 3 — CRITICAL DIP*"),
-    (0.08, 2, "🔴 *LEVEL 2 — SIGNIFICANT DIP*"),
-    (0.05, 1, "⚠️  *LEVEL 1 — DIP ALERT*"),
+    (0.20, 4, "🚨 AGGRESSIVE BUY",  "Deploy maximum capital. Deep crash — rare entry."),
+    (0.12, 3, "💥 STRONG BUY",      "Strong entry point. Significant correction."),
+    (0.08, 2, "✅ BUY",             "Start building position. Healthy dip confirmed."),
+    (0.05, 1, "📉 ACCUMULATE",      "Add a small tranche. Mild pullback in progress."),
 ]
 
 # ── EXTERNAL DATA SOURCES ─────────────────────────────────────────────────────
@@ -358,11 +372,11 @@ def compute_mdd(current: float, peak: float) -> float:
 
 
 def classify_tier(mdd: float) -> tuple:
-    """Returns (tier_int, label_str) for the most severe threshold breached."""
-    for threshold, level, label in ALERT_TIERS:
+    """Returns (tier_int, signal_label, action_line) or (None, None, None)."""
+    for threshold, level, label, action in ALERT_TIERS:
         if mdd >= threshold:
-            return level, label
-    return None, None
+            return level, label, action
+    return None, None, None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -432,11 +446,11 @@ def process_fund(code: str, cfg: dict, vix: float, amfi_navs: dict):
     peak_nav, peak_date = refresh_watermark(code, history)
     log.info(f"  52-Week High (watermark DB):  ₹{peak_nav:.4f} on {peak_date}")
 
-    mdd         = compute_mdd(curr_nav, peak_nav)
-    tier, label = classify_tier(mdd)
-    vix_high    = vix >= VIX_HIGH
+    mdd                  = compute_mdd(curr_nav, peak_nav)
+    tier, signal, action = classify_tier(mdd)
+    vix_high             = vix >= VIX_HIGH
     log.info(
-        f"  MDD: {mdd:.2%}  |  Tier: {tier or 'None'}  |  "
+        f"  MDD: {mdd:.2%}  |  Signal: {signal or 'WAIT'}  |  "
         f"VIX: {vix:.2f} {'⬆ HIGH' if vix_high else ''}"
     )
 
@@ -452,6 +466,7 @@ def process_fund(code: str, cfg: dict, vix: float, amfi_navs: dict):
             "peak_date": peak_date,
             "mdd_pct":   round(mdd * 100, 2),
             "tier":      tier,
+            "signal":    signal or "WAIT",
             "vix":       round(vix, 2),
             "vix_high":  vix_high,
             "hash":      h,
@@ -459,26 +474,30 @@ def process_fund(code: str, cfg: dict, vix: float, amfi_navs: dict):
 
     if tier is not None:
         if is_on_cooldown(code, tier):
-            log.info(f"  Tier {tier} on {COOLDOWN_HOURS}h cooldown — suppressing alert")
+            log.info(f"  {signal} on {COOLDOWN_HOURS}h cooldown — suppressing alert")
         else:
             vix_line = (
-                f"India VIX: `{vix:.2f}` 📈 *High Volatility — Stronger Entry Signal*"
+                f"India VIX: `{vix:.2f}` 📈 High volatility — stronger entry signal"
                 if vix_high else
-                f"India VIX: `{vix:.2f}`"
+                f"India VIX: `{vix:.2f}` — moderate volatility"
             )
+            sep = "━" * 28
             msg = (
-                f"{label}\n\n"
-                f"Fund: *{emoji} {name}*\n"
-                f"Current NAV:  ₹`{curr_nav:.4f}`\n"
-                f"52-Week High: ₹`{peak_nav:.4f}` _(on {peak_date})_\n"
-                f"Drawdown:     *{mdd:.2%}*\n"
+                f"{signal}\n"
+                f"{sep}\n"
+                f"Fund:  *{emoji} {name}*\n\n"
+                f"NAV Now:     ₹`{curr_nav:.4f}`\n"
+                f"52-Wk High:  ₹`{peak_nav:.4f}` _({peak_date})_\n"
+                f"Drawdown:    *{mdd:.2%}*\n\n"
+                f"📌 *Action:* {action}\n"
                 f"{vix_line}\n"
-                f"Date: `{today_str()}`"
+                f"{sep}\n"
+                f"🗓 {today_str()}"
             )
             if send_alert(msg):
                 set_cooldown(code, tier)
     else:
-        log.info(f"  No actionable dip  (MDD {mdd:.2%} < 5% L1 floor)")
+        log.info(f"  Signal: WAIT  (MDD {mdd:.2%} — below accumulate floor)")
 
     mark_processed(name)
 
