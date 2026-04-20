@@ -2,41 +2,125 @@ name: Dip Alert Pipeline v3.1
 
 on:
   schedule:
-    # 02:30 UTC = 08:00 IST — AMFI has finished publishing previous day NAVs
-    - cron: "30 2 * * 1-5"   # Monday–Friday only; no NAVs on weekends
-  workflow_dispatch:           # Allow manual trigger from Actions tab
+    # ── Daily dip alert: 02:30 UTC = 08:00 IST, Mon–Fri ──────────────────────
+    - cron: "30 2 * * 1-5"
+    # ── Weekly report: 03:30 UTC = 09:00 IST, Monday only ────────────────────
+    - cron: "30 3 * * 1"
+    # ── Crisis monitor AM: 02:30 UTC = 08:00 IST, daily ──────────────────────
+    - cron: "30 2 * * *"
+    # ── Crisis monitor PM: 14:30 UTC = 20:00 IST, daily ─────────────────────
+    - cron: "30 14 * * *"
+  workflow_dispatch:
+    inputs:
+      run_target:
+        description: "Which script to run manually"
+        required: true
+        default: "dip_alert"
+        type: choice
+        options:
+          - dip_alert
+          - weekly_report
+          - crisis_monitor
 
 permissions:
-  contents: write   # allows github-actions[bot] to push state files back
+  contents: write
 
 jobs:
-  run-alert:
+
+  # ── 1. Daily Dip Alert ─────────────────────────────────────────────────────
+  dip-alert:
+    name: "Daily Dip Alert (08:00 IST)"
     runs-on: ubuntu-latest
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '30 2 * * 1-5') ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_target == 'dip_alert')
 
     steps:
-      - name: Checkout repo (includes persisted state files)
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run Dip Alert Pipeline
+      - name: Run daily dip alert
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python dip_alert.py
 
-      - name: Commit updated state files back to repo
+      - name: Commit state files
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add signal_log.csv nav_processed.txt watermarks.db
-          git diff --cached --quiet || git commit -m "chore: state update $(date -u '+%Y-%m-%d')"
+          git diff --cached --quiet || git commit -m "chore: dip-alert state $(date -u '+%Y-%m-%d')"
+          git push
+
+  # ── 2. Weekly Report ───────────────────────────────────────────────────────
+  weekly-report:
+    name: "Weekly Report (Monday 09:00 IST)"
+    runs-on: ubuntu-latest
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '30 3 * * 1') ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_target == 'weekly_report')
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run weekly report
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python weekly_report.py
+
+  # ── 3. Crisis Monitor (AM + PM) ────────────────────────────────────────────
+  crisis-monitor:
+    name: "Crisis Monitor (08:00 & 20:00 IST)"
+    runs-on: ubuntu-latest
+    if: >
+      (github.event_name == 'schedule' && (
+        github.event.schedule == '30 2 * * *' ||
+        github.event.schedule == '30 14 * * *'
+      )) ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_target == 'crisis_monitor')
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run crisis monitor
+        env:
+          ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python crisis_monitor.py
+
+      - name: Commit crisis log
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add crisis_log.csv || true
+          git diff --cached --quiet || git commit -m "chore: crisis-log $(date -u '+%Y-%m-%d %H:%M')"
           git push
