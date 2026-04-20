@@ -17,7 +17,7 @@ How it works:
 Requires one extra GitHub secret:
   ANTHROPIC_API_KEY   →  from console.anthropic.com
 
-All other secrets (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) are shared
+Crisis alerts use dedicated secrets TELEGRAM_BOT_TOKEN_CRISIS + TELEGRAM_CHAT_ID_CRISIS
 with dip_alert.py — no new Telegram setup needed.
 """
 
@@ -44,8 +44,13 @@ log = logging.getLogger(__name__)
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+# Dedicated crisis channel — separate from the daily fund alert chat.
+# GitHub Secrets needed:
+#   TELEGRAM_BOT_TOKEN_CRISIS  →  bot token (can be the same bot, different chat)
+#   TELEGRAM_CHAT_ID_CRISIS    →  chat/group ID for crisis alerts only
+TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN_CRISIS", "")
+TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID_CRISIS", "")
 
 CRISIS_LOG = "crisis_log.csv"
 
