@@ -1,23 +1,32 @@
 # -*- coding: utf-8 -*-
 """
-Global Crisis Monitor — zero API key, completely free
-=======================================================
+Global Crisis Monitor — India-relevant alerts only
+====================================================
 Runs twice daily (08:00 IST and 20:00 IST) via GitHub Actions.
 
-Two detection layers — no paid API needed:
+Alert philosophy: Only fire if the event is CONFIRMED to affect Indian
+markets. A US market dip alone, or a generic war headline without India
+context, will NOT trigger an alert. This prevents noise and alert fatigue.
 
-  LAYER 1 — Market Data (yfinance)
-    Checks overnight moves in major global indices and commodities:
-    S&P 500, Nasdaq, Hang Seng, Nikkei, crude oil, gold, USD/INR.
-    Triggers alert if any single asset drops beyond threshold in one session.
+TWO LAYERS, BOTH MUST CONFIRM INDIA RELEVANCE:
 
-  LAYER 2 — News RSS Headlines (free feeds)
-    Fetches latest headlines from Reuters Business, BBC Business,
-    Economic Times Markets, and Mint. Scans for crisis keywords
-    (war, sanctions, crash, circuit breaker, pandemic, default, etc.)
-    Matches are scored and rated HIGH / MEDIUM / LOW.
+  LAYER 1 — Market Data (yfinance, free)
+    Rule A — Direct India signal (always relevant):
+              Nifty 50 drops, India VIX spikes, or USD/INR weakens sharply.
+    Rule B — Global contagion signal:
+              3 or more major global indices crash in the same session.
+              (One market having a bad day = not India's problem.)
 
-Requires NO new secrets — uses the dedicated crisis channel:
+  LAYER 2 — News Headlines (free RSS feeds)
+    Pass 1 — Match crisis keywords (war, crash, default, pandemic, etc.)
+    Pass 2 — Confirm India relevance via one of:
+              (a) India/Nifty/Rupee/RBI/Sensex/SEBI mentioned in headline, OR
+              (b) Event is in "globally unavoidable" category that hits ALL
+                  markets regardless: nuclear threat, WHO pandemic, oil embargo,
+                  G7/G20 systemic collapse, major central bank emergency.
+    If Pass 2 fails → headline is discarded, no alert.
+
+Secrets needed (no API key required):
   TELEGRAM_BOT_TOKEN_CRISIS
   TELEGRAM_CHAT_ID_CRISIS
 """
@@ -40,100 +49,110 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 # ── LOGGING ───────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
 
-# ── TELEGRAM (dedicated crisis channel) ──────────────────────────────────────
+# ── TELEGRAM ──────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN_CRISIS", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID_CRISIS", "")
 
 # ── STATE ─────────────────────────────────────────────────────────────────────
 CRISIS_LOG  = "crisis_log.csv"
-DEDUP_HOURS = 12    # suppress identical alert within this window
+DEDUP_HOURS = 12
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LAYER 1 — MARKET THRESHOLDS
-# Each tuple: (yfinance_ticker, display_name, drop_HIGH%, drop_MEDIUM%)
-# Negative = drop; positive = spike (e.g. VIX spike, USD/INR spike)
+# LAYER 1 CONFIG — MARKET WATCHLIST
+#
+# Group A: DIRECT INDIA signals — any single trigger fires an alert
+# Group B: GLOBAL indices — need 3+ simultaneous triggers (contagion rule)
+#
+# Tuple: (ticker, display_name, group, drop_HIGH_pct, drop_MEDIUM_pct)
+# Negative threshold = looking for a drop; positive = looking for a spike
 # ─────────────────────────────────────────────────────────────────────────────
-MARKET_WATCHLIST = [
-    # Global equity indices
-    ("^GSPC",    "S&P 500",          -3.0,  -2.0),
-    ("^IXIC",    "Nasdaq",           -3.5,  -2.5),
-    ("^N225",    "Nikkei 225",       -3.0,  -2.0),
-    ("^HSI",     "Hang Seng",        -4.0,  -2.5),
-    ("^FTSE",    "FTSE 100",         -3.0,  -2.0),
-    # Indian market
-    ("^NSEI",    "Nifty 50",         -3.0,  -2.0),
-    ("^INDIAVIX","India VIX",        +30.0, +20.0),  # spike = fear
-    # Commodities & FX
-    ("CL=F",     "Crude Oil (WTI)",  -5.0,  -3.5),
-    ("GC=F",     "Gold",             +3.0,  +2.0),   # gold spike = panic
-    ("USDINR=X", "USD/INR",          +1.5,  +1.0),   # INR weakening
+
+INDIA_DIRECT = [
+    # (ticker, name, HIGH_threshold, MEDIUM_threshold)
+    ("^NSEI",     "Nifty 50",    -3.0, -2.0),   # Indian index drop
+    ("^INDIAVIX", "India VIX",  +35.0, +25.0),  # fear spike
+    ("USDINR=X",  "USD/INR",     +1.5,  +1.0),  # rupee weakening
 ]
 
+GLOBAL_INDICES = [
+    ("^GSPC",  "S&P 500",      -3.0, -2.0),
+    ("^IXIC",  "Nasdaq",       -3.5, -2.5),
+    ("^N225",  "Nikkei 225",   -3.0, -2.0),
+    ("^HSI",   "Hang Seng",    -4.0, -3.0),
+    ("^FTSE",  "FTSE 100",     -3.0, -2.0),
+    ("^GDAXI", "DAX",          -3.0, -2.0),
+    ("CL=F",   "Crude Oil",    -6.0, -4.0),
+]
+
+# Minimum global markets that must trigger simultaneously for contagion rule
+CONTAGION_THRESHOLD = 3
+
 # ─────────────────────────────────────────────────────────────────────────────
-# LAYER 2 — NEWS RSS FEEDS + KEYWORD SCORING
+# LAYER 2 CONFIG — NEWS KEYWORDS
 # ─────────────────────────────────────────────────────────────────────────────
+
 RSS_FEEDS = [
     ("Reuters Business",    "https://feeds.reuters.com/reuters/businessNews"),
     ("BBC Business",        "http://feeds.bbci.co.uk/news/business/rss.xml"),
     ("Economic Times Mkts", "https://economictimes.indiatimes.com/markets/rss.cms"),
     ("Mint Markets",        "https://www.livemint.com/rss/markets"),
+    ("Reuters World",       "https://feeds.reuters.com/Reuters/worldNews"),
 ]
 
-# (keyword_pattern, score, category)
-# Score 3 = HIGH, 2 = MEDIUM, 1 = LOW
+# Pass 1: Crisis keyword matching (score + category)
+# Score ≥ 3 = HIGH candidate, 2 = MEDIUM candidate
 CRISIS_KEYWORDS = [
-    # Wars / geopolitics
-    (r"\bwar\b",                        3, "Geopolitical"),
-    (r"\bmilitary.{0,15}strike",        3, "Geopolitical"),
-    (r"\bnuclear\b",                    3, "Geopolitical"),
-    (r"\bsanctions?\b",                 2, "Geopolitical"),
-    (r"\bblockade\b",                   2, "Geopolitical"),
-    (r"\bgeopolit",                     1, "Geopolitical"),
-
+    # Wars / military
+    (r"\bwar\b",                                    3, "War"),
+    (r"\bmilitary.{0,15}(strike|attack|invasion)",  3, "War"),
+    (r"\bnuclear.{0,20}(threat|weapon|strike)",     3, "Nuclear"),
+    (r"\bsanctions?\b",                             2, "Geopolitical"),
+    (r"\bblockade\b",                               2, "Geopolitical"),
     # Market crashes
-    (r"\bcircuit.{0,10}breaker",        3, "Market Crash"),
-    (r"\bmarket.{0,10}crash",           3, "Market Crash"),
+    (r"\bcircuit.{0,10}breaker",                    3, "Market Crash"),
+    (r"\bmarket.{0,10}crash",                       3, "Market Crash"),
     (r"\bblack.{0,5}(monday|tuesday|wednesday|thursday|friday)", 3, "Market Crash"),
-    (r"\bstock.{0,10}(plunge|collapse|meltdown)", 3, "Market Crash"),
-    (r"\bsell.{0,5}off\b",             2, "Market Crash"),
-    (r"\bbear.{0,8}market",            2, "Market Crash"),
-
-    # Financial / banking crises
-    (r"\bbank.{0,10}(collapse|fail|run|default)", 3, "Banking Crisis"),
-    (r"\bsovereign.{0,10}default",     3, "Banking Crisis"),
-    (r"\bdebt.{0,10}crisis",           3, "Banking Crisis"),
-    (r"\bliquidity.{0,10}crisis",      2, "Banking Crisis"),
-    (r"\bbailout\b",                   2, "Banking Crisis"),
-    (r"\bcredit.{0,10}crunch",         2, "Banking Crisis"),
-
+    (r"\bstock.{0,15}(plunge|collapse|meltdown)",  3, "Market Crash"),
+    (r"\bglobal.{0,10}sell.{0,5}off",              2, "Market Crash"),
+    # Banking / financial crisis
+    (r"\bbank.{0,10}(collapse|fail|run|default)",  3, "Banking Crisis"),
+    (r"\bsovereign.{0,10}default",                 3, "Banking Crisis"),
+    (r"\bdebt.{0,10}crisis",                       3, "Banking Crisis"),
+    (r"\bsystemic.{0,10}risk",                     2, "Banking Crisis"),
+    (r"\bbailout\b",                               2, "Banking Crisis"),
     # Central bank emergency
-    (r"\bemergency.{0,15}rate",        3, "Central Bank"),
-    (r"\bunscheduled.{0,15}(meeting|cut|hike)", 3, "Central Bank"),
-    (r"\bfed.{0,10}(emergency|panic|crisis)", 2, "Central Bank"),
-    (r"\brbi.{0,10}(emergency|action|intervene)", 2, "Central Bank"),
-
-    # Commodities / supply chain
-    (r"\boil.{0,10}(shock|embargo|crisis|spike)", 2, "Commodity"),
-    (r"\bsupply.{0,10}chain.{0,10}(crisis|collapse|disruption)", 2, "Commodity"),
-
-    # Health / pandemic
-    (r"\bpandemic\b",                  3, "Health"),
-    (r"\bwho.{0,15}(emergency|declare|alert)", 3, "Health"),
-    (r"\bepidemic\b",                  2, "Health"),
-    (r"\blockdown.{0,15}(china|global|nationwide)", 2, "Health"),
-
-    # India-specific macro
-    (r"\binr.{0,10}(crash|collapse|record.{0,10}low)", 3, "India Macro"),
-    (r"\brupee.{0,10}(crash|plunge|record.{0,10}low)", 3, "India Macro"),
-    (r"\bsebi.{0,10}(ban|suspend|halt)",               2, "India Macro"),
-    (r"\bindia.{0,10}(recession|downgr)",              2, "India Macro"),
+    (r"\bemergency.{0,15}(rate|cut|meeting)",      3, "Central Bank"),
+    (r"\bunscheduled.{0,15}(rate|meeting|cut)",    3, "Central Bank"),
+    # Oil / commodity shock
+    (r"\boil.{0,10}(embargo|shock|crisis)",        3, "Oil Shock"),
+    (r"\bopec.{0,15}(cut|ban|embargo)",            2, "Oil Shock"),
+    # Pandemic / health
+    (r"\bpandemic\b",                              3, "Pandemic"),
+    (r"\bwho.{0,15}(emergency|declare|outbreak)",  3, "Pandemic"),
+    (r"\bepidemic\b",                              2, "Pandemic"),
+    # India-direct (automatically pass the relevance check)
+    (r"\bnifty.{0,15}(crash|circuit|halt|suspend)", 3, "India Direct"),
+    (r"\brupee.{0,10}(crash|plunge|record.{0,10}low|all.{0,5}time.{0,5}low)", 3, "India Direct"),
+    (r"\binr.{0,10}(crash|plunge|record.{0,10}low)", 3, "India Direct"),
+    (r"\brbi.{0,10}(emergency|intervene|crisis)",  3, "India Direct"),
+    (r"\bsebi.{0,10}(ban|suspend|halt|crisis)",    2, "India Direct"),
+    (r"\bindia.{0,10}(recession|downgrad|crisis)",  2, "India Direct"),
 ]
+
+# Pass 2a: India mention keywords — if any found in headline = relevant
+INDIA_MENTION_PATTERNS = [
+    r"\bindia\b", r"\bindian\b", r"\bnifty\b", r"\bsensex\b",
+    r"\brupee\b", r"\binr\b", r"\brbi\b", r"\bsebi\b",
+    r"\bmumbai\b", r"\bnse\b", r"\bbse\b", r"\bnew delhi\b",
+    r"\bmodi\b", r"\bbjp\b",
+]
+
+# Pass 2b: Globally unavoidable categories — these affect India regardless
+# If the event falls in one of these categories AND score ≥ 3, skip India mention check
+GLOBALLY_UNAVOIDABLE = {"Nuclear", "Pandemic", "Oil Shock", "Market Crash", "Banking Crisis"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -148,7 +167,7 @@ def today_str():
 
 def send_telegram(message: str) -> bool:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        log.warning("Crisis Telegram not configured — set TELEGRAM_BOT_TOKEN_CRISIS + TELEGRAM_CHAT_ID_CRISIS")
+        log.warning("Crisis Telegram not configured")
         return False
     try:
         resp = requests.post(
@@ -157,10 +176,10 @@ def send_telegram(message: str) -> bool:
             timeout=10,
         )
         resp.raise_for_status()
-        log.info("Crisis alert sent to Telegram")
+        log.info("Crisis alert sent")
         return True
     except Exception as exc:
-        log.error(f"Telegram send failed: {exc}")
+        log.error(f"Telegram failed: {exc}")
         return False
 
 def event_hash(text: str) -> str:
@@ -180,171 +199,228 @@ def already_alerted(h: str) -> bool:
         pass
     return False
 
-def log_crisis(timestamp, risk, headline, source, h):
-    file_exists = os.path.exists(CRISIS_LOG)
+def write_crisis_log(timestamp, risk, headline, source, h):
+    exists = os.path.exists(CRISIS_LOG)
     with open(CRISIS_LOG, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["timestamp","risk_level","headline","source","hash"])
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow({
-            "timestamp":  timestamp,
-            "risk_level": risk,
-            "headline":   headline,
-            "source":     source,
-            "hash":       h,
-        })
+        w = csv.DictWriter(f, fieldnames=["timestamp","risk_level","headline","source","hash"])
+        if not exists:
+            w.writeheader()
+        w.writerow({"timestamp": timestamp, "risk_level": risk,
+                    "headline": headline, "source": source, "hash": h})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LAYER 1 — MARKET DATA CHECK
+# LAYER 1 — MARKET DATA
 # ─────────────────────────────────────────────────────────────────────────────
 
-def check_markets() -> list[dict]:
+def get_one_day_move(ticker: str) -> float | None:
+    """Returns % change from previous close to latest close. None on failure."""
+    try:
+        df = yf.download(ticker, period="5d", interval="1d", progress=False)
+        if df is None or len(df) < 2:
+            return None
+        close = df["Close"].squeeze().dropna()
+        prev, curr = float(close.iloc[-2]), float(close.iloc[-1])
+        if prev == 0:
+            return None
+        return ((curr - prev) / prev) * 100
+    except Exception as exc:
+        log.warning(f"  yfinance failed for {ticker}: {exc}")
+        return None
+
+
+def check_markets() -> tuple[list, list, str]:
     """
-    Downloads last 5 days of data for each ticker.
-    Returns list of triggered assets with their move %.
+    Returns (india_hits, global_hits, overall_risk).
+    india_hits  — Direct India signals triggered (any = alert)
+    global_hits — Global indices triggered (need CONTAGION_THRESHOLD = alert)
     """
-    triggered = []
-    for ticker, name, high_thresh, med_thresh in MARKET_WATCHLIST:
-        try:
-            df = yf.download(ticker, period="5d", interval="1d", progress=False)
-            if df is None or len(df) < 2:
-                continue
+    india_hits  = []
+    global_hits = []
 
-            close = df["Close"].squeeze().dropna()
-            if len(close) < 2:
-                continue
+    log.info("  Checking direct India indicators...")
+    for ticker, name, high_t, med_t in INDIA_DIRECT:
+        pct = get_one_day_move(ticker)
+        if pct is None:
+            log.info(f"    {name}: no data")
+            continue
+        if high_t < 0:
+            triggered_high = pct <= high_t
+            triggered_med  = high_t < pct <= med_t
+        else:
+            triggered_high = pct >= high_t
+            triggered_med  = med_t <= pct < high_t
 
-            prev  = float(close.iloc[-2])
-            curr  = float(close.iloc[-1])
-            if prev == 0:
-                continue
+        if triggered_high or triggered_med:
+            risk = "HIGH" if triggered_high else "MEDIUM"
+            india_hits.append({"name": name, "pct": round(pct, 2), "risk": risk})
+            log.info(f"    ⚡ {name}: {pct:+.2f}% → {risk}")
+        else:
+            log.info(f"    {name}: {pct:+.2f}% — normal")
 
-            pct_chg = ((curr - prev) / prev) * 100
+    log.info("  Checking global indices for contagion...")
+    for ticker, name, high_t, med_t in GLOBAL_INDICES:
+        pct = get_one_day_move(ticker)
+        if pct is None:
+            continue
+        if high_t < 0:
+            triggered = pct <= med_t   # use MEDIUM as the contagion bar
+        else:
+            triggered = pct >= med_t
 
-            # Determine direction of concern
-            if high_thresh < 0:
-                is_high = pct_chg <= high_thresh
-                is_med  = high_thresh < pct_chg <= med_thresh
-            else:
-                is_high = pct_chg >= high_thresh
-                is_med  = med_thresh <= pct_chg < high_thresh
+        if triggered:
+            risk = "HIGH" if (pct <= high_t if high_t < 0 else pct >= high_t) else "MEDIUM"
+            global_hits.append({"name": name, "pct": round(pct, 2), "risk": risk})
+            log.info(f"    ⚡ {name}: {pct:+.2f}% → {risk}")
+        else:
+            log.info(f"    {name}: {pct:+.2f}% — normal")
 
-            if is_high or is_med:
-                risk = "HIGH" if is_high else "MEDIUM"
-                triggered.append({
-                    "ticker":  ticker,
-                    "name":    name,
-                    "pct_chg": round(pct_chg, 2),
-                    "curr":    round(curr, 2),
-                    "risk":    risk,
-                })
-                log.info(f"  Market trigger: {name} {pct_chg:+.2f}% → {risk}")
-            else:
-                log.info(f"  {name}: {pct_chg:+.2f}% — within normal range")
+    # Determine overall risk
+    contagion = len(global_hits) >= CONTAGION_THRESHOLD
+    if india_hits:
+        risk = "HIGH" if any(h["risk"] == "HIGH" for h in india_hits) else "MEDIUM"
+    elif contagion:
+        risk = "HIGH" if sum(1 for h in global_hits if h["risk"] == "HIGH") >= 2 else "MEDIUM"
+        log.info(f"  Contagion rule triggered ({len(global_hits)} global markets affected)")
+    else:
+        risk = "NONE"
 
-        except Exception as exc:
-            log.warning(f"  {name} ({ticker}) fetch failed: {exc}")
-
-    return triggered
+    return india_hits, global_hits, risk
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LAYER 2 — RSS NEWS SCAN
+# LAYER 2 — NEWS RSS (with India relevance gate)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_rss_headlines(url: str, max_items: int = 20) -> list[str]:
-    """Parse RSS feed and return list of title + description strings."""
+def fetch_rss_headlines(url: str, max_items: int = 25) -> list[str]:
     try:
         resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
         root  = ET.fromstring(resp.content)
         items = root.findall(".//item")[:max_items]
-        texts = []
+        out   = []
         for item in items:
-            parts = []
-            for tag in ("title", "description"):
-                el = item.find(tag)
-                if el is not None and el.text:
-                    parts.append(el.text.strip())
-            if parts:
-                texts.append(" | ".join(parts))
-        return texts
+            parts = [
+                (item.find(tag).text or "").strip()
+                for tag in ("title", "description")
+                if item.find(tag) is not None
+            ]
+            text = " | ".join(p for p in parts if p)
+            if text:
+                out.append(text)
+        return out
     except Exception as exc:
-        log.warning(f"RSS fetch failed for {url}: {exc}")
+        log.warning(f"    RSS fetch failed ({url}): {exc}")
         return []
 
 
-def score_headlines(headlines: list[str]) -> list[dict]:
+def is_india_relevant(text_lower: str, categories: set) -> tuple[bool, str]:
     """
-    Returns list of matched headlines with score and category.
-    Score 3+ = HIGH, 2 = MEDIUM, 1 = LOW.
+    Returns (is_relevant, reason_string).
+    Two paths to relevance:
+      (a) India explicitly mentioned in the headline
+      (b) Event is globally unavoidable AND high-scoring
     """
-    matched = []
-    seen    = set()
+    # Path (a): India mentioned directly
+    for pat in INDIA_MENTION_PATTERNS:
+        if re.search(pat, text_lower):
+            return True, "India mentioned directly"
 
-    for text in headlines:
-        text_lower = text.lower()
-        total_score = 0
-        categories  = set()
+    # (b): Globally unavoidable category
+    overlap = categories & GLOBALLY_UNAVOIDABLE
+    if overlap:
+        return True, f"Globally unavoidable: {', '.join(overlap)}"
 
-        for pattern, score, category in CRISIS_KEYWORDS:
-            if re.search(pattern, text_lower):
-                total_score += score
-                categories.add(category)
-
-        if total_score >= 2:
-            key = text[:80]
-            if key not in seen:
-                seen.add(key)
-                risk = "HIGH" if total_score >= 3 else "MEDIUM"
-                matched.append({
-                    "headline":   text[:200],
-                    "score":      total_score,
-                    "categories": list(categories),
-                    "risk":       risk,
-                })
-
-    # Sort most alarming first
-    matched.sort(key=lambda x: x["score"], reverse=True)
-    return matched
+    return False, "No India relevance confirmed"
 
 
-def check_news() -> list[dict]:
-    """Scan all RSS feeds, return matched items with source tag."""
-    all_matches = []
+def scan_news() -> list[dict]:
+    """
+    Returns confirmed India-relevant crisis headlines only.
+    Two-pass: keyword match → India relevance gate.
+    """
+    confirmed = []
+    seen_keys = set()
+
     for source_name, url in RSS_FEEDS:
         log.info(f"  Scanning: {source_name}")
         headlines = fetch_rss_headlines(url)
-        matches   = score_headlines(headlines)
-        for m in matches:
-            m["source"] = source_name
-        all_matches.extend(matches)
-        log.info(f"    {len(headlines)} headlines → {len(matches)} matches")
-    return all_matches
+        log.info(f"    {len(headlines)} headlines fetched")
+
+        for text in headlines:
+            text_lower = text.lower()
+
+            # Pass 1: Crisis keyword scoring
+            total_score = 0
+            categories  = set()
+            for pattern, score, category in CRISIS_KEYWORDS:
+                if re.search(pattern, text_lower):
+                    total_score += score
+                    categories.add(category)
+
+            if total_score < 2:
+                continue   # Not a crisis headline at all
+
+            # "India Direct" category automatically passes relevance check
+            if "India Direct" in categories:
+                relevant, reason = True, "India Direct category"
+            else:
+                # Pass 2: India relevance gate
+                relevant, reason = is_india_relevant(text_lower, categories)
+
+            if not relevant:
+                log.info(f"    ✗ Filtered out (no India relevance): {text[:80]}...")
+                continue
+
+            # Deduplicate
+            key = text[:80]
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+
+            risk = "HIGH" if total_score >= 3 else "MEDIUM"
+            confirmed.append({
+                "headline":   text[:220],
+                "score":      total_score,
+                "categories": list(categories),
+                "risk":       risk,
+                "source":     source_name,
+                "reason":     reason,
+            })
+            log.info(f"    ✓ Confirmed [{risk}] ({reason}): {text[:80]}...")
+
+    confirmed.sort(key=lambda x: x["score"], reverse=True)
+    return confirmed
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ALERT FORMATTING
 # ─────────────────────────────────────────────────────────────────────────────
 
-def format_market_alert(triggered: list[dict]) -> str:
-    sep   = "━" * 30
-    level = "HIGH" if any(t["risk"] == "HIGH" for t in triggered) else "MEDIUM"
-    header = "🚨 *GLOBAL CRISIS ALERT — MARKET SHOCK*" if level == "HIGH" \
-             else "👁 *MARKET WATCH — SIGNIFICANT MOVES*"
+def format_market_alert(india_hits: list, global_hits: list, risk: str) -> str:
+    sep    = "━" * 30
+    header = "🚨 *CRISIS ALERT — INDIA MARKET SHOCK*" if risk == "HIGH" \
+             else "👁 *MARKET WATCH — INDIA IMPACT DETECTED*"
+    lines  = [header, sep]
 
-    lines = [header, sep]
-    for t in triggered:
-        arrow  = "🔻" if t["pct_chg"] < 0 else "🔺"
-        risk_tag = "‼️" if t["risk"] == "HIGH" else "⚠️"
-        lines.append(f"{risk_tag} *{t['name']}*: {arrow} `{t['pct_chg']:+.2f}%`  _(now {t['curr']:,})_")
+    if india_hits:
+        lines.append("*🇮🇳 Direct India Signals:*")
+        for h in india_hits:
+            arrow = "🔻" if h["pct"] < 0 else "🔺"
+            icon  = "‼️" if h["risk"] == "HIGH" else "⚠️"
+            lines.append(f"  {icon} *{h['name']}*: {arrow} `{h['pct']:+.2f}%`")
+
+    if global_hits and len(global_hits) >= CONTAGION_THRESHOLD:
+        lines.append(f"\n*🌍 Global Contagion ({len(global_hits)} markets):*")
+        for h in global_hits:
+            arrow = "🔻" if h["pct"] < 0 else "🔺"
+            lines.append(f"  ⚠️ {h['name']}: {arrow} `{h['pct']:+.2f}%`")
 
     lines += [
         "",
-        "📌 *What this means for Indian MFs:*",
-        "Global sell-offs typically drag Indian markets within 1–2 sessions.",
-        "Monitor Nifty open. If further dip — dip alert will trigger.",
+        "📌 *What to do:*",
+        "Indian market likely to open weak. Monitor your dip alert channel.",
+        "Do NOT panic sell existing SIPs. Await NAV confirmation.",
         sep,
         f"_Crisis Monitor • {today_str()} IST_",
     ]
@@ -352,24 +428,26 @@ def format_market_alert(triggered: list[dict]) -> str:
 
 
 def format_news_alert(matches: list[dict]) -> str:
-    sep   = "━" * 30
-    level = "HIGH" if any(m["risk"] == "HIGH" for m in matches) else "MEDIUM"
-    header = "🚨 *GLOBAL CRISIS ALERT — NEWS*" if level == "HIGH" \
-             else "👁 *GLOBAL MARKET WATCH — NEWS*"
+    sep    = "━" * 30
+    risk   = "HIGH" if any(m["risk"] == "HIGH" for m in matches) else "MEDIUM"
+    header = "🚨 *CRISIS ALERT — INDIA-RELEVANT NEWS*" if risk == "HIGH" \
+             else "👁 *MARKET WATCH — INDIA-RELEVANT NEWS*"
 
     lines = [header, sep]
-    # Show top 4 matches max to keep message readable
     for m in matches[:4]:
         cats = ", ".join(m["categories"])
         icon = "🔴" if m["risk"] == "HIGH" else "🟡"
-        lines.append(f"{icon} *[{cats}]* _{m['source']}_")
-        lines.append(f"   {m['headline'][:180]}")
-        lines.append("")
+        lines += [
+            f"{icon} *[{cats}]* — _{m['source']}_",
+            f"   {m['headline'][:200]}",
+            f"   _India relevance: {m['reason']}_",
+            "",
+        ]
 
     lines += [
         "📌 *Suggested action:*",
-        "Stay alert. Do NOT make panic decisions.",
-        "Wait for dip alert system to confirm a real NAV drop.",
+        "Stay informed. Wait for dip alert to confirm actual NAV impact.",
+        "SIP: continue as planned. Lump sum: hold until signal confirmed.",
         sep,
         f"_Crisis Monitor • {today_str()} IST_",
     ]
@@ -381,59 +459,56 @@ def format_news_alert(matches: list[dict]) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    log.info("═" * 50)
-    log.info("  Crisis Monitor — Started")
-    log.info("═" * 50)
+    log.info("═" * 52)
+    log.info("  Crisis Monitor — India-Relevant Filter Active")
+    log.info("═" * 52)
 
     # ── Layer 1: Market data ───────────────────────────────────────────────
-    log.info("Layer 1: Checking global market moves...")
-    market_hits = check_markets()
-    log.info(f"  Triggered assets: {len(market_hits)}")
+    log.info("Layer 1: Market data check...")
+    india_hits, global_hits, market_risk = check_markets()
 
-    # ── Layer 2: RSS news ─────────────────────────────────────────────────
-    log.info("Layer 2: Scanning news RSS feeds...")
-    news_hits = check_news()
-    log.info(f"  Crisis news matches: {len(news_hits)}")
-
-    # ── Market alerts ─────────────────────────────────────────────────────
-    if market_hits:
-        summary  = " | ".join(f"{t['name']} {t['pct_chg']:+.2f}%" for t in market_hits)
-        h        = event_hash("market:" + summary)
-        risk     = "HIGH" if any(t["risk"] == "HIGH" for t in market_hits) else "MEDIUM"
-
-        log_crisis(today_str(), risk, summary, "market_data", h)
+    if market_risk != "NONE":
+        summary = " | ".join(
+            f"{h['name']} {h['pct']:+.2f}%"
+            for h in (india_hits + global_hits)
+        )
+        h = event_hash("market:" + summary)
+        write_crisis_log(today_str(), market_risk, summary, "market_data", h)
 
         if not already_alerted(h):
-            msg = format_market_alert(market_hits)
-            send_telegram(msg)
+            log.info(f"  → Firing market alert [{market_risk}]")
+            send_telegram(format_market_alert(india_hits, global_hits, market_risk))
         else:
-            log.info("  Market alert already sent within 12h — skipping")
+            log.info("  → Market alert already sent within 12h — suppressed")
     else:
-        log.info("  No abnormal market moves detected")
+        log.info("  No India-relevant market moves detected")
 
-    # ── News alerts ───────────────────────────────────────────────────────
-    if news_hits:
-        # Group by risk level — fire one message per level max
-        high_hits = [m for m in news_hits if m["risk"] == "HIGH"]
-        med_hits  = [m for m in news_hits if m["risk"] == "MEDIUM"]
+    # ── Layer 2: News headlines ────────────────────────────────────────────
+    log.info("Layer 2: News RSS scan with India relevance gate...")
+    news_matches = scan_news()
+    log.info(f"  India-confirmed matches: {len(news_matches)}")
 
-        for group, label in [(high_hits, "HIGH"), (med_hits, "MEDIUM")]:
+    if news_matches:
+        high = [m for m in news_matches if m["risk"] == "HIGH"]
+        med  = [m for m in news_matches if m["risk"] == "MEDIUM"]
+
+        for group, label in [(high, "HIGH"), (med, "MEDIUM")]:
             if not group:
                 continue
-            key = event_hash("news:" + label + group[0]["headline"])
-            log_crisis(today_str(), label, group[0]["headline"], group[0]["source"], key)
+            h = event_hash("news:" + label + group[0]["headline"])
+            write_crisis_log(today_str(), label, group[0]["headline"], group[0]["source"], h)
 
-            if not already_alerted(key):
-                msg = format_news_alert(group)
-                send_telegram(msg)
+            if not already_alerted(h):
+                log.info(f"  → Firing news alert [{label}]")
+                send_telegram(format_news_alert(group))
             else:
-                log.info(f"  {label} news alert already sent within 12h — skipping")
+                log.info(f"  → {label} news alert already sent within 12h — suppressed")
     else:
-        log.info("  No crisis keywords found in news feeds")
+        log.info("  No India-relevant crisis news confirmed")
 
-    log.info("═" * 50)
+    log.info("═" * 52)
     log.info("  Crisis Monitor — Done")
-    log.info("═" * 50)
+    log.info("═" * 52)
 
 
 if __name__ == "__main__":
