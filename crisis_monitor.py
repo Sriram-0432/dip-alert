@@ -1,35 +1,39 @@
 # -*- coding: utf-8 -*-
 """
-Global Crisis Monitor — powered by Claude + web search
-========================================================
+Global Crisis Monitor — zero API key, completely free
+=======================================================
 Runs twice daily (08:00 IST and 20:00 IST) via GitHub Actions.
 
-How it works:
-  1. Calls the Anthropic API with the web_search tool enabled
-  2. Asks Claude to scan live news for global events that could
-     significantly impact Indian markets (wars, crashes, sanctions,
-     rate surprises, pandemics, geopolitical shocks, etc.)
-  3. Claude rates the risk: HIGH / MEDIUM / LOW / NONE
-  4. HIGH  → immediate Telegram alert with full analysis
-     MEDIUM → Telegram alert tagged as "Watch" (monitor, not panic)
-     LOW/NONE → logged only, no Telegram noise
+Two detection layers — no paid API needed:
 
-Requires one extra GitHub secret:
-  ANTHROPIC_API_KEY   →  from console.anthropic.com
+  LAYER 1 — Market Data (yfinance)
+    Checks overnight moves in major global indices and commodities:
+    S&P 500, Nasdaq, Hang Seng, Nikkei, crude oil, gold, USD/INR.
+    Triggers alert if any single asset drops beyond threshold in one session.
 
-Crisis alerts use dedicated secrets TELEGRAM_BOT_TOKEN_CRISIS + TELEGRAM_CHAT_ID_CRISIS
-with dip_alert.py — no new Telegram setup needed.
+  LAYER 2 — News RSS Headlines (free feeds)
+    Fetches latest headlines from Reuters Business, BBC Business,
+    Economic Times Markets, and Mint. Scans for crisis keywords
+    (war, sanctions, crash, circuit breaker, pandemic, default, etc.)
+    Matches are scored and rated HIGH / MEDIUM / LOW.
+
+Requires NO new secrets — uses the dedicated crisis channel:
+  TELEGRAM_BOT_TOKEN_CRISIS
+  TELEGRAM_CHAT_ID_CRISIS
 """
 
 import os
 import sys
 import io
-import json
+import re
+import csv
 import logging
 import hashlib
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 
 import requests
+import yfinance as yf
 
 # ── UTF-8 FIX ─────────────────────────────────────────────────────────────────
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -42,32 +46,109 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── CONFIG ────────────────────────────────────────────────────────────────────
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+# ── TELEGRAM (dedicated crisis channel) ──────────────────────────────────────
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN_CRISIS", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID_CRISIS", "")
 
-# Dedicated crisis channel — separate from the daily fund alert chat.
-# GitHub Secrets needed:
-#   TELEGRAM_BOT_TOKEN_CRISIS  →  bot token (can be the same bot, different chat)
-#   TELEGRAM_CHAT_ID_CRISIS    →  chat/group ID for crisis alerts only
-TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN_CRISIS", "")
-TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID_CRISIS", "")
+# ── STATE ─────────────────────────────────────────────────────────────────────
+CRISIS_LOG  = "crisis_log.csv"
+DEDUP_HOURS = 12    # suppress identical alert within this window
 
-CRISIS_LOG = "crisis_log.csv"
+# ─────────────────────────────────────────────────────────────────────────────
+# LAYER 1 — MARKET THRESHOLDS
+# Each tuple: (yfinance_ticker, display_name, drop_HIGH%, drop_MEDIUM%)
+# Negative = drop; positive = spike (e.g. VIX spike, USD/INR spike)
+# ─────────────────────────────────────────────────────────────────────────────
+MARKET_WATCHLIST = [
+    # Global equity indices
+    ("^GSPC",    "S&P 500",          -3.0,  -2.0),
+    ("^IXIC",    "Nasdaq",           -3.5,  -2.5),
+    ("^N225",    "Nikkei 225",       -3.0,  -2.0),
+    ("^HSI",     "Hang Seng",        -4.0,  -2.5),
+    ("^FTSE",    "FTSE 100",         -3.0,  -2.0),
+    # Indian market
+    ("^NSEI",    "Nifty 50",         -3.0,  -2.0),
+    ("^INDIAVIX","India VIX",        +30.0, +20.0),  # spike = fear
+    # Commodities & FX
+    ("CL=F",     "Crude Oil (WTI)",  -5.0,  -3.5),
+    ("GC=F",     "Gold",             +3.0,  +2.0),   # gold spike = panic
+    ("USDINR=X", "USD/INR",          +1.5,  +1.0),   # INR weakening
+]
 
-# Only alert once per unique event within this many hours
-DEDUP_HOURS = 12
+# ─────────────────────────────────────────────────────────────────────────────
+# LAYER 2 — NEWS RSS FEEDS + KEYWORD SCORING
+# ─────────────────────────────────────────────────────────────────────────────
+RSS_FEEDS = [
+    ("Reuters Business",    "https://feeds.reuters.com/reuters/businessNews"),
+    ("BBC Business",        "http://feeds.bbci.co.uk/news/business/rss.xml"),
+    ("Economic Times Mkts", "https://economictimes.indiatimes.com/markets/rss.cms"),
+    ("Mint Markets",        "https://www.livemint.com/rss/markets"),
+]
 
-# ── IST ───────────────────────────────────────────────────────────────────────
+# (keyword_pattern, score, category)
+# Score 3 = HIGH, 2 = MEDIUM, 1 = LOW
+CRISIS_KEYWORDS = [
+    # Wars / geopolitics
+    (r"\bwar\b",                        3, "Geopolitical"),
+    (r"\bmilitary.{0,15}strike",        3, "Geopolitical"),
+    (r"\bnuclear\b",                    3, "Geopolitical"),
+    (r"\bsanctions?\b",                 2, "Geopolitical"),
+    (r"\bblockade\b",                   2, "Geopolitical"),
+    (r"\bgeopolit",                     1, "Geopolitical"),
+
+    # Market crashes
+    (r"\bcircuit.{0,10}breaker",        3, "Market Crash"),
+    (r"\bmarket.{0,10}crash",           3, "Market Crash"),
+    (r"\bblack.{0,5}(monday|tuesday|wednesday|thursday|friday)", 3, "Market Crash"),
+    (r"\bstock.{0,10}(plunge|collapse|meltdown)", 3, "Market Crash"),
+    (r"\bsell.{0,5}off\b",             2, "Market Crash"),
+    (r"\bbear.{0,8}market",            2, "Market Crash"),
+
+    # Financial / banking crises
+    (r"\bbank.{0,10}(collapse|fail|run|default)", 3, "Banking Crisis"),
+    (r"\bsovereign.{0,10}default",     3, "Banking Crisis"),
+    (r"\bdebt.{0,10}crisis",           3, "Banking Crisis"),
+    (r"\bliquidity.{0,10}crisis",      2, "Banking Crisis"),
+    (r"\bbailout\b",                   2, "Banking Crisis"),
+    (r"\bcredit.{0,10}crunch",         2, "Banking Crisis"),
+
+    # Central bank emergency
+    (r"\bemergency.{0,15}rate",        3, "Central Bank"),
+    (r"\bunscheduled.{0,15}(meeting|cut|hike)", 3, "Central Bank"),
+    (r"\bfed.{0,10}(emergency|panic|crisis)", 2, "Central Bank"),
+    (r"\brbi.{0,10}(emergency|action|intervene)", 2, "Central Bank"),
+
+    # Commodities / supply chain
+    (r"\boil.{0,10}(shock|embargo|crisis|spike)", 2, "Commodity"),
+    (r"\bsupply.{0,10}chain.{0,10}(crisis|collapse|disruption)", 2, "Commodity"),
+
+    # Health / pandemic
+    (r"\bpandemic\b",                  3, "Health"),
+    (r"\bwho.{0,15}(emergency|declare|alert)", 3, "Health"),
+    (r"\bepidemic\b",                  2, "Health"),
+    (r"\blockdown.{0,15}(china|global|nationwide)", 2, "Health"),
+
+    # India-specific macro
+    (r"\binr.{0,10}(crash|collapse|record.{0,10}low)", 3, "India Macro"),
+    (r"\brupee.{0,10}(crash|plunge|record.{0,10}low)", 3, "India Macro"),
+    (r"\bsebi.{0,10}(ban|suspend|halt)",               2, "India Macro"),
+    (r"\bindia.{0,10}(recession|downgr)",              2, "India Macro"),
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
 def ist_now():
     return datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
 
 def today_str():
     return ist_now().strftime("%Y-%m-%d %H:%M")
 
-# ── TELEGRAM ──────────────────────────────────────────────────────────────────
 def send_telegram(message: str) -> bool:
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        log.warning("Telegram not configured")
+        log.warning("Crisis Telegram not configured — set TELEGRAM_BOT_TOKEN_CRISIS + TELEGRAM_CHAT_ID_CRISIS")
         return False
     try:
         resp = requests.post(
@@ -76,220 +157,283 @@ def send_telegram(message: str) -> bool:
             timeout=10,
         )
         resp.raise_for_status()
-        log.info("Telegram alert sent")
+        log.info("Crisis alert sent to Telegram")
         return True
     except Exception as exc:
-        log.error(f"Telegram failed: {exc}")
+        log.error(f"Telegram send failed: {exc}")
         return False
 
-# ── DEDUP ─────────────────────────────────────────────────────────────────────
-def event_hash(summary: str) -> str:
-    """Stable hash from the first 120 chars of the summary."""
-    return hashlib.md5(summary[:120].encode()).hexdigest()
+def event_hash(text: str) -> str:
+    return hashlib.md5(text[:120].encode()).hexdigest()
 
 def already_alerted(h: str) -> bool:
     if not os.path.exists(CRISIS_LOG):
         return False
     try:
-        import pandas as pd
-        df = pd.read_csv(CRISIS_LOG)
-        if "hash" not in df.columns or "timestamp" not in df.columns:
-            return False
-        match = df[df["hash"] == h]
-        if match.empty:
-            return False
-        # Check if most recent occurrence is within DEDUP_HOURS
-        latest = pd.to_datetime(match["timestamp"]).max()
-        return (ist_now().replace(tzinfo=None) - latest.to_pydatetime()) \
-               < timedelta(hours=DEDUP_HOURS)
+        with open(CRISIS_LOG, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if row.get("hash") == h:
+                    ts = datetime.strptime(row["timestamp"], "%Y-%m-%d %H:%M")
+                    if (ist_now().replace(tzinfo=None) - ts) < timedelta(hours=DEDUP_HOURS):
+                        return True
     except Exception:
-        return False
+        pass
+    return False
 
-def log_crisis(row: dict):
-    import pandas as pd
-    pd.DataFrame([row]).to_csv(
-        CRISIS_LOG, mode="a",
-        header=not os.path.exists(CRISIS_LOG),
-        index=False,
-    )
+def log_crisis(timestamp, risk, headline, source, h):
+    file_exists = os.path.exists(CRISIS_LOG)
+    with open(CRISIS_LOG, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["timestamp","risk_level","headline","source","hash"])
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow({
+            "timestamp":  timestamp,
+            "risk_level": risk,
+            "headline":   headline,
+            "source":     source,
+            "hash":       h,
+        })
 
-# ── CLAUDE API CALL ───────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are a financial risk analyst specialising in Indian equity markets.
-Your job is to scan current global news and identify any events in the last 24–48 hours
-that could materially impact Indian stock markets (Nifty 50, Sensex) or Indian mutual funds.
 
-Events to watch for:
-- Wars, military escalations, geopolitical conflicts (especially involving major economies)
-- Global market crashes or circuit breakers triggered (US, China, Europe, Japan)
-- Emergency central bank actions (surprise rate cuts/hikes by Fed, ECB, RBI, etc.)
-- Major sanctions, trade wars, oil price shocks, commodity crises
-- Pandemics, health emergencies declared by WHO
-- Banking collapses or systemic financial crises (Lehman-type events)
-- Political shocks in G20 nations (coups, sudden elections, defaults)
-- Natural disasters affecting global supply chains
+# ─────────────────────────────────────────────────────────────────────────────
+# LAYER 1 — MARKET DATA CHECK
+# ─────────────────────────────────────────────────────────────────────────────
 
-You MUST respond with ONLY a valid JSON object — no preamble, no markdown fences.
-Schema:
-{
-  "risk_level": "HIGH" | "MEDIUM" | "LOW" | "NONE",
-  "headline": "One-line summary of the main risk event (max 100 chars)",
-  "events": [
-    {
-      "title": "Event name",
-      "impact": "How this affects Indian markets specifically",
-      "urgency": "immediate" | "this_week" | "monitor"
-    }
-  ],
-  "india_impact": "2–3 sentence assessment of likely impact on Indian equity/MF",
-  "suggested_action": "What an Indian retail MF investor should do/watch",
-  "sources_checked": ["list of news sources or regions you scanned"]
-}
-
-If nothing significant: set risk_level to "NONE", headline to "No major risk events detected",
-and leave events as an empty array.
-"""
-
-USER_PROMPT = """Search for major global news from the last 48 hours that could 
-significantly affect Indian stock markets. Focus on wars, geopolitical crises, 
-major market crashes globally, central bank emergency actions, pandemics, or 
-any systemic financial risks. Be thorough — check US, Europe, Middle East, China, 
-and South/Southeast Asia news. Return your analysis as JSON only."""
-
-def call_claude_with_search() -> dict | None:
+def check_markets() -> list[dict]:
     """
-    Calls claude-sonnet-4-20250514 with web_search enabled.
-    Returns parsed JSON dict or None on failure.
+    Downloads last 5 days of data for each ticker.
+    Returns list of triggered assets with their move %.
     """
-    if not ANTHROPIC_API_KEY:
-        log.error("ANTHROPIC_API_KEY not set — cannot run crisis monitor")
-        return None
+    triggered = []
+    for ticker, name, high_thresh, med_thresh in MARKET_WATCHLIST:
+        try:
+            df = yf.download(ticker, period="5d", interval="1d", progress=False)
+            if df is None or len(df) < 2:
+                continue
 
-    payload = {
-        "model": "claude-sonnet-4-20250514",
-        "max_tokens": 1500,
-        "system": SYSTEM_PROMPT,
-        "tools": [
-            {
-                "type": "web_search_20250305",
-                "name": "web_search"
-            }
-        ],
-        "messages": [
-            {"role": "user", "content": USER_PROMPT}
-        ],
-    }
+            close = df["Close"].squeeze().dropna()
+            if len(close) < 2:
+                continue
 
+            prev  = float(close.iloc[-2])
+            curr  = float(close.iloc[-1])
+            if prev == 0:
+                continue
+
+            pct_chg = ((curr - prev) / prev) * 100
+
+            # Determine direction of concern
+            if high_thresh < 0:
+                is_high = pct_chg <= high_thresh
+                is_med  = high_thresh < pct_chg <= med_thresh
+            else:
+                is_high = pct_chg >= high_thresh
+                is_med  = med_thresh <= pct_chg < high_thresh
+
+            if is_high or is_med:
+                risk = "HIGH" if is_high else "MEDIUM"
+                triggered.append({
+                    "ticker":  ticker,
+                    "name":    name,
+                    "pct_chg": round(pct_chg, 2),
+                    "curr":    round(curr, 2),
+                    "risk":    risk,
+                })
+                log.info(f"  Market trigger: {name} {pct_chg:+.2f}% → {risk}")
+            else:
+                log.info(f"  {name}: {pct_chg:+.2f}% — within normal range")
+
+        except Exception as exc:
+            log.warning(f"  {name} ({ticker}) fetch failed: {exc}")
+
+    return triggered
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LAYER 2 — RSS NEWS SCAN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fetch_rss_headlines(url: str, max_items: int = 20) -> list[str]:
+    """Parse RSS feed and return list of title + description strings."""
     try:
-        resp = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "Content-Type":         "application/json",
-                "x-api-key":            ANTHROPIC_API_KEY,
-                "anthropic-version":    "2023-06-01",
-                "anthropic-beta":       "web-search-2025-03-05",
-            },
-            json=payload,
-            timeout=90,   # web search calls can take time
-        )
+        resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
-        data = resp.json()
+        root  = ET.fromstring(resp.content)
+        items = root.findall(".//item")[:max_items]
+        texts = []
+        for item in items:
+            parts = []
+            for tag in ("title", "description"):
+                el = item.find(tag)
+                if el is not None and el.text:
+                    parts.append(el.text.strip())
+            if parts:
+                texts.append(" | ".join(parts))
+        return texts
     except Exception as exc:
-        log.error(f"Anthropic API call failed: {exc}")
-        return None
+        log.warning(f"RSS fetch failed for {url}: {exc}")
+        return []
 
-    # Extract the final text block (after tool_use/tool_result rounds)
-    text_blocks = [
-        block["text"]
-        for block in data.get("content", [])
-        if block.get("type") == "text"
+
+def score_headlines(headlines: list[str]) -> list[dict]:
+    """
+    Returns list of matched headlines with score and category.
+    Score 3+ = HIGH, 2 = MEDIUM, 1 = LOW.
+    """
+    matched = []
+    seen    = set()
+
+    for text in headlines:
+        text_lower = text.lower()
+        total_score = 0
+        categories  = set()
+
+        for pattern, score, category in CRISIS_KEYWORDS:
+            if re.search(pattern, text_lower):
+                total_score += score
+                categories.add(category)
+
+        if total_score >= 2:
+            key = text[:80]
+            if key not in seen:
+                seen.add(key)
+                risk = "HIGH" if total_score >= 3 else "MEDIUM"
+                matched.append({
+                    "headline":   text[:200],
+                    "score":      total_score,
+                    "categories": list(categories),
+                    "risk":       risk,
+                })
+
+    # Sort most alarming first
+    matched.sort(key=lambda x: x["score"], reverse=True)
+    return matched
+
+
+def check_news() -> list[dict]:
+    """Scan all RSS feeds, return matched items with source tag."""
+    all_matches = []
+    for source_name, url in RSS_FEEDS:
+        log.info(f"  Scanning: {source_name}")
+        headlines = fetch_rss_headlines(url)
+        matches   = score_headlines(headlines)
+        for m in matches:
+            m["source"] = source_name
+        all_matches.extend(matches)
+        log.info(f"    {len(headlines)} headlines → {len(matches)} matches")
+    return all_matches
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ALERT FORMATTING
+# ─────────────────────────────────────────────────────────────────────────────
+
+def format_market_alert(triggered: list[dict]) -> str:
+    sep   = "━" * 30
+    level = "HIGH" if any(t["risk"] == "HIGH" for t in triggered) else "MEDIUM"
+    header = "🚨 *GLOBAL CRISIS ALERT — MARKET SHOCK*" if level == "HIGH" \
+             else "👁 *MARKET WATCH — SIGNIFICANT MOVES*"
+
+    lines = [header, sep]
+    for t in triggered:
+        arrow  = "🔻" if t["pct_chg"] < 0 else "🔺"
+        risk_tag = "‼️" if t["risk"] == "HIGH" else "⚠️"
+        lines.append(f"{risk_tag} *{t['name']}*: {arrow} `{t['pct_chg']:+.2f}%`  _(now {t['curr']:,})_")
+
+    lines += [
+        "",
+        "📌 *What this means for Indian MFs:*",
+        "Global sell-offs typically drag Indian markets within 1–2 sessions.",
+        "Monitor Nifty open. If further dip — dip alert will trigger.",
+        sep,
+        f"_Crisis Monitor • {today_str()} IST_",
     ]
-    if not text_blocks:
-        log.error("No text block in Claude response")
-        log.debug(f"Full response: {json.dumps(data, indent=2)}")
-        return None
+    return "\n".join(lines)
 
-    raw = text_blocks[-1].strip()
-    # Strip markdown fences if model wraps in ```json
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    raw = raw.strip()
 
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        log.error(f"Failed to parse Claude JSON response: {exc}")
-        log.error(f"Raw response:\n{raw}")
-        return None
+def format_news_alert(matches: list[dict]) -> str:
+    sep   = "━" * 30
+    level = "HIGH" if any(m["risk"] == "HIGH" for m in matches) else "MEDIUM"
+    header = "🚨 *GLOBAL CRISIS ALERT — NEWS*" if level == "HIGH" \
+             else "👁 *GLOBAL MARKET WATCH — NEWS*"
 
-# ── ALERT FORMATTING ──────────────────────────────────────────────────────────
-def format_alert(result: dict, risk_level: str) -> str:
-    sep = "━" * 30
+    lines = [header, sep]
+    # Show top 4 matches max to keep message readable
+    for m in matches[:4]:
+        cats = ", ".join(m["categories"])
+        icon = "🔴" if m["risk"] == "HIGH" else "🟡"
+        lines.append(f"{icon} *[{cats}]* _{m['source']}_")
+        lines.append(f"   {m['headline'][:180]}")
+        lines.append("")
 
-    if risk_level == "HIGH":
-        header = f"🚨 *GLOBAL CRISIS ALERT — HIGH RISK*"
-    else:
-        header = f"👁 *GLOBAL MARKET WATCH — MEDIUM RISK*"
+    lines += [
+        "📌 *Suggested action:*",
+        "Stay alert. Do NOT make panic decisions.",
+        "Wait for dip alert system to confirm a real NAV drop.",
+        sep,
+        f"_Crisis Monitor • {today_str()} IST_",
+    ]
+    return "\n".join(lines)
 
-    events_text = ""
-    for ev in result.get("events", []):
-        urgency_emoji = {"immediate": "🔴", "this_week": "🟡", "monitor": "🔵"}.get(
-            ev.get("urgency", "monitor"), "🔵"
-        )
-        events_text += (
-            f"\n{urgency_emoji} *{ev.get('title', '')}*\n"
-            f"   _{ev.get('impact', '')}_\n"
-        )
 
-    msg = (
-        f"{header}\n"
-        f"{sep}\n"
-        f"📌 *{result.get('headline', '')}*\n"
-        f"{events_text}\n"
-        f"*🇮🇳 India Impact:*\n{result.get('india_impact', '')}\n\n"
-        f"*💡 Suggested Action:*\n{result.get('suggested_action', '')}\n"
-        f"{sep}\n"
-        f"_Crisis Monitor • {today_str()} IST_"
-    )
-    return msg
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
 
-# ── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
-    log.info("=== Crisis Monitor — Started ===")
+    log.info("═" * 50)
+    log.info("  Crisis Monitor — Started")
+    log.info("═" * 50)
 
-    result = call_claude_with_search()
-    if result is None:
-        send_telegram(
-            "🛠 *DEV — Crisis Monitor Failed*\nClaude API call returned no result. "
-            "Check ANTHROPIC_API_KEY secret.",
-            )
-        sys.exit(1)
+    # ── Layer 1: Market data ───────────────────────────────────────────────
+    log.info("Layer 1: Checking global market moves...")
+    market_hits = check_markets()
+    log.info(f"  Triggered assets: {len(market_hits)}")
 
-    risk_level = result.get("risk_level", "NONE").upper()
-    headline   = result.get("headline", "")
-    log.info(f"Risk level: {risk_level} | {headline}")
+    # ── Layer 2: RSS news ─────────────────────────────────────────────────
+    log.info("Layer 2: Scanning news RSS feeds...")
+    news_hits = check_news()
+    log.info(f"  Crisis news matches: {len(news_hits)}")
 
-    # Always log to CSV
-    h = event_hash(headline)
-    log_crisis({
-        "timestamp":  today_str(),
-        "risk_level": risk_level,
-        "headline":   headline,
-        "events":     str(result.get("events", [])),
-        "hash":       h,
-    })
+    # ── Market alerts ─────────────────────────────────────────────────────
+    if market_hits:
+        summary  = " | ".join(f"{t['name']} {t['pct_chg']:+.2f}%" for t in market_hits)
+        h        = event_hash("market:" + summary)
+        risk     = "HIGH" if any(t["risk"] == "HIGH" for t in market_hits) else "MEDIUM"
 
-    if risk_level in ("HIGH", "MEDIUM"):
-        if already_alerted(h):
-            log.info(f"Already alerted for this event within {DEDUP_HOURS}h — skipping")
+        log_crisis(today_str(), risk, summary, "market_data", h)
+
+        if not already_alerted(h):
+            msg = format_market_alert(market_hits)
+            send_telegram(msg)
         else:
-            alert_msg = format_alert(result, risk_level)
-            send_telegram(alert_msg)
+            log.info("  Market alert already sent within 12h — skipping")
     else:
-        log.info("No significant risk detected — no alert sent")
+        log.info("  No abnormal market moves detected")
 
-    log.info("=== Crisis Monitor — Done ===")
+    # ── News alerts ───────────────────────────────────────────────────────
+    if news_hits:
+        # Group by risk level — fire one message per level max
+        high_hits = [m for m in news_hits if m["risk"] == "HIGH"]
+        med_hits  = [m for m in news_hits if m["risk"] == "MEDIUM"]
+
+        for group, label in [(high_hits, "HIGH"), (med_hits, "MEDIUM")]:
+            if not group:
+                continue
+            key = event_hash("news:" + label + group[0]["headline"])
+            log_crisis(today_str(), label, group[0]["headline"], group[0]["source"], key)
+
+            if not already_alerted(key):
+                msg = format_news_alert(group)
+                send_telegram(msg)
+            else:
+                log.info(f"  {label} news alert already sent within 12h — skipping")
+    else:
+        log.info("  No crisis keywords found in news feeds")
+
+    log.info("═" * 50)
+    log.info("  Crisis Monitor — Done")
+    log.info("═" * 50)
 
 
 if __name__ == "__main__":
