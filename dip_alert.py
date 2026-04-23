@@ -576,10 +576,12 @@ def process_fund(code: str, cfg: dict, vix: float, amfi_navs: dict):
     # Current NAV: AMFI direct (today's official) → mfapi latest (fallback)
     if code in amfi_navs:
         curr_nav = amfi_navs[code]
-        log.info(f"  Current NAV (AMFI direct):    ₹{curr_nav:.4f}")
+        nav_date = str(history.index[-1])   # latest date in mfapi history
+        log.info(f"  Current NAV (AMFI direct):    ₹{curr_nav:.4f} on {nav_date}")
     else:
         curr_nav = float(history.iloc[-1])
-        log.warning(f"  Current NAV (mfapi fallback): ₹{curr_nav:.4f}")
+        nav_date = str(history.index[-1])
+        log.warning(f"  Current NAV (mfapi fallback): ₹{curr_nav:.4f} on {nav_date}")
 
     peak_nav, peak_date = refresh_watermark(code, history)
     log.info(f"  52-Week High (watermark DB):  ₹{peak_nav:.4f} on {peak_date}")
@@ -650,7 +652,7 @@ def process_fund(code: str, cfg: dict, vix: float, amfi_navs: dict):
                 f"{signal}\n"
                 f"{sep}\n"
                 f"Fund:  *{emoji} {name}*\n\n"
-                f"NAV Now:     ₹`{curr_nav:.4f}`\n"
+                f"NAV Now:     ₹`{curr_nav:.4f}` _({nav_date})_\n"
                 f"52-Wk High:  ₹`{peak_nav:.4f}` _({peak_date})_\n"
                 f"Drawdown:    *{mdd:.2%}*  |  Nifty DD: `{nifty_dd_str}`\n\n"
                 f"{rel_line}\n"
