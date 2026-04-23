@@ -1,13 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Mutual Fund Dip Alert Pipeline v3.1
-=====================================
+Mutual Fund Dip Alert Pipeline v3.2  — Institutional Grade
+============================================================
 Funds     : PPFCF Direct (122639) + UTI Nifty 50 Direct (120716) + MO Midcap Direct (127042)
 Alerts    : Single Telegram channel for all funds + dev errors
 Scheduler : GitHub Actions (cron: 02:30 UTC = 08:00 IST, weekdays only)
-Signals   : 52-week MDD tiers — L1 ≥5%, L2 ≥8%, L3 ≥12%
+Signals   : 52-week MDD tiers — L1 ≥5%, L2 ≥8%, L3 ≥12%, L4 ≥20%
 State     : SQLite (watermarks.db) committed to repo each run
 Retries   : tenacity exponential backoff on all HTTP calls
+
+v3.2 additions:
+  RSI-14       — Confirms fund is technically oversold (RSI < 35)
+  Rel Strength — Classifies dip as Systemic vs Fund-Specific vs Fund-Strong
+  Pyramiding   — Exact deploy % advice per tier (10 / 25 / 50 / 75%)
 """
 
 import os
@@ -100,6 +105,19 @@ AMFI_NAV_URL = "https://www.amfiindia.com/spages/NAVAll.txt"
 LOOKBACK_DAYS  = 252   # ~52 trading weeks = 1 full year of NAV data
 VIX_HIGH       = 18.0  # above = "high volatility" flag in alert message
 COOLDOWN_HOURS = 24    # suppress same-tier re-alert within this window
+RSI_PERIOD     = 14    # standard RSI window
+RSI_OVERSOLD   = 35    # below this = technically oversold (MF NAVs lag, so 35 not 30)
+NIFTY_TICKER   = "^NSEI"
+
+# ── PYRAMIDING CONFIG ─────────────────────────────────────────────────────────
+# How much of your available dry powder to deploy at each tier.
+# Tier→ (deploy_pct, cash_reserve_note)
+PYRAMID = {
+    1: (10,  "Keep 90% dry — dip may deepen."),
+    2: (25,  "Meaningful entry. Keep 75% in reserve."),
+    3: (50,  "Strong conviction entry. Hold 50% for further dips."),
+    4: (75,  "Rare crash entry. Deploy 75%. Keep 25% for any further leg down."),
+}
 
 # ── STATE FILES (all git-committed by workflow after each run) ────────────────
 WATERMARK_DB  = "watermarks.db"
@@ -371,6 +389,126 @@ def compute_mdd(current: float, peak: float) -> float:
     return (peak - current) / peak
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# v3.2 FEATURE 1 — RSI-14 (Oversold Confirmation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_rsi(series: pd.Series, period: int = RSI_PERIOD) -> float | None:
+    """
+    Wilder's RSI on a NAV price series.
+    Returns float RSI (0–100) or None if insufficient data.
+    Note: MF NAVs are end-of-day smoothed — RSI will lag live market RSI
+    by ~1 session. Used here as a confirmation filter, not a primary signal.
+    """
+    if len(series) < period + 1:
+        return None
+    delta  = series.diff().dropna()
+    gain   = delta.clip(lower=0)
+    loss   = (-delta).clip(lower=0)
+    # Wilder smoothing (exponential with alpha = 1/period)
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    last_loss = float(avg_loss.iloc[-1])
+    if last_loss == 0:
+        return 100.0
+    rs  = float(avg_gain.iloc[-1]) / last_loss
+    rsi = 100 - (100 / (1 + rs))
+    return round(rsi, 1)
+
+
+def rsi_label(rsi: float | None) -> str:
+    if rsi is None:
+        return "N/A"
+    if rsi < 20:
+        return f"`{rsi}` 🔥 Extremely oversold"
+    if rsi < RSI_OVERSOLD:
+        return f"`{rsi}` ✅ Oversold — confirms dip"
+    if rsi < 50:
+        return f"`{rsi}` ⚠️ Weak — not yet oversold"
+    return f"`{rsi}` 🔵 Neutral / strong — dip unconfirmed"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v3.2 FEATURE 2 — RELATIVE STRENGTH (Fund vs Nifty)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fetch_nifty_mdd() -> float | None:
+    """
+    Fetches Nifty 50 MDD from its own 52-week high via yfinance.
+    Returns float (0.0–1.0) or None on failure.
+    """
+    try:
+        df = yf.download(NIFTY_TICKER, period="1y", progress=False)
+        if df is None or df.empty:
+            return None
+        close    = df["Close"].squeeze().dropna()
+        peak     = float(close.max())
+        current  = float(close.iloc[-1])
+        return (peak - current) / peak if peak > 0 else None
+    except Exception as exc:
+        log.warning(f"Nifty MDD fetch failed: {exc}")
+        return None
+
+
+def classify_relative_strength(fund_mdd: float, nifty_mdd: float | None) -> tuple[str, str]:
+    """
+    Compares fund drawdown against Nifty drawdown.
+    Returns (classification, explanation) tuple.
+
+    Systemic   — both fund and Nifty are down by similar magnitude
+                 → broad market selling, deploy across all holdings
+    Fund-Spec  — fund is down significantly more than Nifty
+                 → something specific to this fund/sector, investigate first
+    Fund-Strong— fund is barely down while Nifty is falling
+                 → manager doing their job, not a buying opportunity
+    """
+    if nifty_mdd is None:
+        return "Unknown", "Nifty data unavailable — cannot classify."
+
+    diff = fund_mdd - nifty_mdd   # positive = fund fell more than Nifty
+
+    if diff > 0.04:               # fund down >4% more than Nifty
+        return (
+            "🔍 Fund-Specific Dip",
+            f"Fund fell *{diff:.1%} more* than Nifty ({nifty_mdd:.1%} Nifty DD). "
+            "Deploy cautiously — investigate fund-level cause first."
+        )
+    elif abs(diff) <= 0.04:       # both moving roughly together
+        return (
+            "🌊 Systemic Dip",
+            f"Fund and Nifty falling together (Nifty DD: {nifty_mdd:.1%}). "
+            "Broad market sell-off — strong case for deployment."
+        )
+    else:                         # fund down less than Nifty
+        return (
+            "💪 Fund Holding Strong",
+            f"Fund down less than Nifty (Nifty DD: {nifty_mdd:.1%}). "
+            "Manager defending well — not a distressed entry point."
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v3.2 FEATURE 3 — PYRAMIDING ADVICE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def pyramiding_advice(tier: int, dip_type: str) -> str:
+    """
+    Returns deploy % and rationale based on tier + dip classification.
+    Adjusts downward for Fund-Specific dips (higher uncertainty).
+    """
+    base_pct, note = PYRAMID.get(tier, (10, ""))
+
+    # Reduce conviction for fund-specific dips — unknown cause warrants caution
+    if "Fund-Specific" in dip_type and base_pct > 10:
+        adjusted = base_pct // 2
+        return (
+            f"Deploy *~{adjusted}%* of dry powder "
+            f"_(halved from {base_pct}% — fund-specific dip, verify cause first)_\n"
+            f"   {note}"
+        )
+    return f"Deploy *~{base_pct}%* of dry powder\n   {note}"
+
+
 def classify_tier(mdd: float) -> tuple:
     """Returns (tier_int, signal_label, action_line) or (None, None, None)."""
     for threshold, level, label, action in ALERT_TIERS:
@@ -449,8 +587,18 @@ def process_fund(code: str, cfg: dict, vix: float, amfi_navs: dict):
     mdd                  = compute_mdd(curr_nav, peak_nav)
     tier, signal, action = classify_tier(mdd)
     vix_high             = vix >= VIX_HIGH
+
+    # ── v3.2: RSI-14 ──────────────────────────────────────────────────────────
+    rsi = compute_rsi(history)
+    oversold = rsi is not None and rsi < RSI_OVERSOLD
+
+    # ── v3.2: Relative Strength ───────────────────────────────────────────────
+    nifty_mdd                = fetch_nifty_mdd()
+    rel_strength, rel_detail = classify_relative_strength(mdd, nifty_mdd)
+
     log.info(
         f"  MDD: {mdd:.2%}  |  Signal: {signal or 'WAIT'}  |  "
+        f"RSI-14: {rsi}  |  {rel_strength}  |  "
         f"VIX: {vix:.2f} {'⬆ HIGH' if vix_high else ''}"
     )
 
@@ -458,39 +606,59 @@ def process_fund(code: str, cfg: dict, vix: float, amfi_navs: dict):
     h = signal_hash(name, tier, curr_nav)
     if not already_logged(h):
         log_signal({
-            "date":      today_str(),
-            "fund":      name,
-            "scheme":    code,
-            "nav":       round(curr_nav, 4),
-            "peak_nav":  round(peak_nav, 4),
-            "peak_date": peak_date,
-            "mdd_pct":   round(mdd * 100, 2),
-            "tier":      tier,
-            "signal":    signal or "WAIT",
-            "vix":       round(vix, 2),
-            "vix_high":  vix_high,
-            "hash":      h,
+            "date":          today_str(),
+            "fund":          name,
+            "scheme":        code,
+            "nav":           round(curr_nav, 4),
+            "peak_nav":      round(peak_nav, 4),
+            "peak_date":     peak_date,
+            "mdd_pct":       round(mdd * 100, 2),
+            "tier":          tier,
+            "signal":        signal or "WAIT",
+            "rsi_14":        rsi,
+            "oversold":      oversold,
+            "nifty_mdd_pct": round(nifty_mdd * 100, 2) if nifty_mdd else None,
+            "rel_strength":  rel_strength,
+            "vix":           round(vix, 2),
+            "vix_high":      vix_high,
+            "hash":          h,
         })
 
     if tier is not None:
         if is_on_cooldown(code, tier):
             log.info(f"  {signal} on {COOLDOWN_HOURS}h cooldown — suppressing alert")
         else:
+            # ── v3.2: Pyramiding advice ────────────────────────────────────────
+            pyramid_line = pyramiding_advice(tier, rel_strength)
+
+            # VIX context
             vix_line = (
-                f"India VIX: `{vix:.2f}` 📈 High volatility — stronger entry signal"
+                f"India VIX: `{vix:.2f}` 📈 High volatility — stronger entry"
                 if vix_high else
                 f"India VIX: `{vix:.2f}` — moderate volatility"
             )
-            sep = "━" * 28
+
+            # RSI confirmation line
+            rsi_line = f"RSI-14:    {rsi_label(rsi)}"
+
+            # Relative strength line
+            nifty_dd_str = f"{nifty_mdd:.2%}" if nifty_mdd else "N/A"
+            rel_line = f"Dip Type:  *{rel_strength}*"
+
+            sep = "━" * 30
             msg = (
                 f"{signal}\n"
                 f"{sep}\n"
                 f"Fund:  *{emoji} {name}*\n\n"
                 f"NAV Now:     ₹`{curr_nav:.4f}`\n"
                 f"52-Wk High:  ₹`{peak_nav:.4f}` _({peak_date})_\n"
-                f"Drawdown:    *{mdd:.2%}*\n\n"
+                f"Drawdown:    *{mdd:.2%}*  |  Nifty DD: `{nifty_dd_str}`\n\n"
+                f"{rel_line}\n"
+                f"_{rel_detail}_\n\n"
+                f"{rsi_line}\n"
+                f"{vix_line}\n\n"
                 f"📌 *Action:* {action}\n"
-                f"{vix_line}\n"
+                f"💰 *Deploy:* {pyramid_line}\n"
                 f"{sep}\n"
                 f"🗓 {today_str()}"
             )
@@ -508,7 +676,7 @@ def process_fund(code: str, cfg: dict, vix: float, amfi_navs: dict):
 
 def main():
     log.info("═" * 52)
-    log.info("  Dip Alert Pipeline v3.1 — Started")
+    log.info("  Dip Alert Pipeline v3.2 — Started")
     log.info("═" * 52)
 
     init_db()
@@ -535,7 +703,7 @@ def main():
             )
 
     log.info("═" * 52)
-    log.info("  Dip Alert Pipeline v3.1 — Completed")
+    log.info("  Dip Alert Pipeline v3.2 — Completed")
     log.info("═" * 52)
 
 
