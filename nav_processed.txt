@@ -83,3 +83,6 @@
 2026-05-18|PPFAS Flexi Cap Direct
 2026-05-18|UTI Nifty 50 Index Direct
 2026-05-18|Motilal Oswal Midcap Direct
+2026-05-19|PPFAS Flexi Cap Direct
+2026-05-19|UTI Nifty 50 Index Direct
+2026-05-19|Motilal Oswal Midcap Direct
