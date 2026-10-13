@@ -418,3 +418,6 @@ date,nav_date,fund,nav,peak_3m,dd_3m_pct,peak_6m,dd_6m_pct,vix,regime,nifty50_dd
 2026-10-12,PPFAS Flexi Cap Direct,122639,88.9258,95.7732,2025-10-27,7.15,1,📉 ACCUMULATE,45.3,False,15.22,💪 Fund Holding Strong,15.24,False,421c73146b9f6c216e7a680600068cf8
 2026-10-12,UTI Nifty 50 Index Direct,120716,158.5759,183.9374,2026-01-02,13.79,3,💥 STRONG BUY,36.5,False,15.22,🌊 Systemic Dip,15.24,False,dc77dec21ab9cbf71a67bbc41b28372f
 2026-10-12,Motilal Oswal Midcap Direct,127042,114.9478,123.4405,2026-08-31,6.88,1,📉 ACCUMULATE,41.9,False,15.21,💪 Fund Holding Strong,15.24,False,ee1565c5418867b3ab47a31e53cfd9c0
+2026-10-13,PPFAS Flexi Cap Direct,122639,88.5547,95.7732,2025-10-27,7.54,1,📉 ACCUMULATE,42.7,False,13.8,💪 Fund Holding Strong,14.24,False,f546ad0193fe9dd1e99ebd8107feacd9
+2026-10-13,UTI Nifty 50 Index Direct,120716,157.4672,183.9374,2026-01-02,14.39,3,💥 STRONG BUY,34.0,True,13.81,🌊 Systemic Dip,14.24,False,d112147124021e4bc9a0b029c295c63b
+2026-10-13,Motilal Oswal Midcap Direct,127042,115.5924,123.4405,2026-08-31,6.36,1,📉 ACCUMULATE,44.6,False,13.8,💪 Fund Holding Strong,14.24,False,cc68600a499e04736e3d5a609df7e2ea
